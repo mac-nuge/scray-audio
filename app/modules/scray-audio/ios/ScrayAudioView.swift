@@ -93,11 +93,11 @@ class ScrayAudioView: ExpoView, WKScriptMessageHandler, WKNavigationDelegate {
 
         switch action {
         case "state":
-            resolve(id, ["folder": store.folderName ?? NSNull()])
+            resolve(id, ["folder": Self.orNull(store.folderName)])
         case "pickFolder":
-            store.pickFolder { [weak self] name in self?.resolve(id, ["folder": name ?? NSNull()]) }
+            store.pickFolder { [weak self] name in self?.resolve(id, ["folder": Self.orNull(name)]) }
         case "manifestRead":
-            resolve(id, store.readManifest() ?? NSNull())
+            resolve(id, Self.orNull(store.readManifest()))
         case "manifestWrite":
             guard let text = p["text"] as? String else { reject(id, "No text"); return }
             if store.writeManifest(text) { resolve(id, true) } else { reject(id, "Couldn't write the list of saved tracks") }
@@ -145,6 +145,12 @@ class ScrayAudioView: ExpoView, WKScriptMessageHandler, WKNavigationDelegate {
 
     private func run(_ js: String) {
         DispatchQueue.main.async { self.webView.evaluateJavaScript(js) }
+    }
+
+    /// A string, or JSON null.
+    private static func orNull(_ s: String?) -> Any {
+        if let s = s { return s }
+        return NSNull()
     }
 
     /// A JavaScript string literal (JSON is one).
