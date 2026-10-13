@@ -1,0 +1,7 @@
+node_modules/
+.expo/
+/ios
+/android
+# made by scripts/make-web.js from the page in the repo root
+/web
+*.ipa
