@@ -8,7 +8,7 @@ named `test:` until it has been tried and then `stable:`. Record the reasoning, 
 ## Entries
 
 ### audio 1.5 — test: BBW Sounds iOS app
-<!-- 2026-10-13T21:20Z -->
+<!-- 2026-10-13T21:15Z -->
 - **Asked:** adapt the library into an iOS app, as a workflow that outputs an IPA, that can save files offline, kept in a folder like Scray Native's; named BBW Sounds. (The page and server half is audio 1.4.)
 - **Built like scray-native, on purpose:** Expo SDK 57 / RN 0.86 with one Swift module, `expo prebuild` + `xcodebuild` on `macos-latest`, unsigned IPA, optional publish to the same SideStore source (`scripts/sidestore-publish.js`, copied). Bundle id `com.mac.scrayaudio` (SideStore adds the team id after it), version `1.0.<run number>`. In `app/`, so the site's deploy never serves it (`.htaccess` blocks `/app/`).
 - **The page is bundled, not loaded from the site.** The app has to open with no network (that is the point of offline), so `make-web.js` turns `index.php` into a static `index.html` (PHP login check and cache numbers dropped, the site-only `/scray/` scripts removed) and the build copies it into the app, as Native does with `assets/web`. Cost: a page change needs a new IPA. A "Remote" variant that loads the page from a staging folder, as Native has, is the obvious follow-up if that gets tiresome.
