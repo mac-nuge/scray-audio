@@ -42,6 +42,15 @@ if ($action !== 'cover') {
     }
 }
 
+// The iOS app calls this from its own page (file://), so it is cross-origin.
+// Safe: nothing here rides on cookies from another site - the app sends its
+// key in a header, and a browser page on another site has no key to send.
+header('Access-Control-Allow-Origin: *');
+header('Access-Control-Allow-Headers: X-Scray-Key, Content-Type, X-Scray-Enc');
+header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
+header('Access-Control-Max-Age: 86400');
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') { http_response_code(204); exit; }
+
 if ($action === 'ping') jsonOut(['ok' => true, 'at' => gmdate('c')]);
 
 // ============================================================
@@ -58,6 +67,24 @@ if ($action === 'ping') jsonOut(['ok' => true, 'at' => gmdate('c')]);
 $secrets = @include SCRAY_SECRETS_FILE;
 if (!is_array($secrets)) fail(500, 'secrets file missing or unreadable: ' . SCRAY_SECRETS_FILE);
 
+/**
+ * A per-phone key (sd_ + 64 hex) issued by Scray's device_pair. Only a SHA-256
+ * of each is kept, in scray_devices.json beside the databases - the same file
+ * and hash scray-devices.php writes. Read-only here: revoking a phone on
+ * twofactor.php cuts it off from the audio library too.
+ */
+function audioDeviceKeyOk(string $key): bool {
+    if (!preg_match('/^sd_[0-9a-f]{64}$/', $key)) return false;
+    $raw = @file_get_contents(SCRAY_DATA_DIR . '/scray_devices.json');
+    $st = is_string($raw) ? json_decode($raw, true) : null;
+    if (!is_array($st)) return false;
+    $want = hash('sha256', 'scray-device|' . $key);
+    foreach ((array)($st['devices'] ?? []) as $d) {
+        if (is_array($d) && hash_equals((string)($d['hash'] ?? ''), $want)) return true;
+    }
+    return false;
+}
+
 $isWorker = false;
 if (strncmp($action, 'audio_worker_', 13) === 0) {
     $want = (string)($secrets['audio_worker_key'] ?? '');
@@ -68,7 +95,7 @@ if (strncmp($action, 'audio_worker_', 13) === 0) {
     require_once AUDIO_AUTH_FILE;
     $key  = (string)($_SERVER['HTTP_X_SCRAY_KEY'] ?? '');
     $tier = scray_auth_tier($key);
-    if (!in_array($tier, ['session', 'admin'], true)) fail(401, 'bad key - log in again');
+    if (!in_array($tier, ['session', 'admin'], true) && !audioDeviceKeyOk($key)) fail(401, 'bad key - log in again');
 }
 
 // ============================================================
@@ -239,7 +266,7 @@ function cleanPath(string $p): string {
     return preg_replace('#/+#', '/', $p);
 }
 
-const TRACK_COLS = 'id, title, artist, album_artist, album, track_no, disc_no, year, genre, duration_ms, ext, folder, filename, (cover IS NOT NULL) AS has_cover';
+const TRACK_COLS = 'id, title, artist, album_artist, album, track_no, disc_no, year, genre, duration_ms, ext, folder, filename, path, size, (cover IS NOT NULL) AS has_cover';
 
 /** One track as the page wants it. Missing tags fall back to the file name. */
 function shapeTrack(array $r): array {
@@ -258,6 +285,8 @@ function shapeTrack(array $r): array {
         'ms'    => $r['duration_ms'] === null ? null : (int)$r['duration_ms'],
         'ext'   => (string)$r['ext'],
         'folder' => (string)$r['folder'],
+        'path'  => (string)$r['path'],
+        'size'  => $r['size'] === null ? null : (int)$r['size'],
         'cover' => (bool)$r['has_cover'],
     ];
 }
@@ -602,6 +631,15 @@ case 'url': {
 }
 
 // ---- cover: <img src> target; redirects to a signed link for the art ---
+// The app's <img> cannot send the key header, so it asks here (with the header)
+// for the signed link and uses that as the image address.
+case 'cover_url': {
+    $id = (int)($_GET['t'] ?? 0);
+    $c = run($db, 'SELECT cover FROM tracks WHERE id = :i AND deleted = 0 AND cover IS NOT NULL', [':i' => $id])->fetchColumn();
+    if ($c === false || $c === null) fail(404, 'no cover');
+    jsonOut(['ok' => true, 'url' => audioSignedUrl($secrets, (string)$c), 'expires_in' => max(60, audioTtl($secrets) - 300)]);
+}
+
 case 'cover': {
     $id = (int)($_GET['t'] ?? 0);
     $c = run($db, 'SELECT cover FROM tracks WHERE id = :i AND deleted = 0 AND cover IS NOT NULL', [':i' => $id])->fetchColumn();

@@ -52,27 +52,29 @@ button { cursor: pointer; background: none; border: 0; padding: 0; }
 }
 #shuffleall:hover { filter: brightness(1.08); }
 
-#scanbtn {
+#scanbtn, #offbtn, #dlbtn {
   display: inline-flex; align-items: center; gap: 6px; padding: 8px 11px; border-radius: 8px;
   border: 1px solid var(--line); color: var(--dim); white-space: nowrap;
 }
-#scanbtn:hover, #scanbtn[aria-expanded="true"] { color: var(--text); border-color: var(--accent); }
-#scanbtn .ic { font-size: 16px; line-height: 1; display: inline-block; }
-#scanbtn.busy { color: var(--accent); border-color: var(--accent); }
+#scanbtn:hover, #scanbtn[aria-expanded="true"], #offbtn:hover, #dlbtn:hover, #dlbtn[aria-expanded="true"] { color: var(--text); border-color: var(--accent); }
+#scanbtn .ic, #offbtn .ic, #dlbtn .ic { font-size: 16px; line-height: 1; display: inline-block; }
+#dlbtn.busy, #scanbtn.busy { color: var(--accent); border-color: var(--accent); }
 #scanbtn.busy .ic { animation: spin 1.2s linear infinite; }
-#scanbtn.bad { color: var(--danger); border-color: var(--danger); }
-#scanlabel { font: 12px var(--mono); }
+#dlbtn.bad, #scanbtn.bad { color: var(--danger); border-color: var(--danger); }
+#offbtn.on { color: var(--accent); border-color: var(--accent); background: var(--panel); }
+#offcount:not(:empty) { font: 12px var(--mono); color: var(--dim); }
+#dllabel, #scanlabel { font: 12px var(--mono); }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ---------- scan panel ---------- */
-#scanpanel {
+#scanpanel, #dlpanel {
   position: fixed; top: 58px; right: 16px; z-index: 40; width: min(380px, calc(100vw - 24px));
   padding: 14px 16px 16px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line);
   box-shadow: 0 10px 34px rgba(0, 0, 0, .55);
 }
-#scanpanel .shead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
-#scanclose { font-size: 20px; line-height: 1; color: var(--dim); padding: 2px 8px; border-radius: 6px; }
-#scanclose:hover { color: var(--text); background: var(--panel2); }
+#scanpanel .shead, #dlpanel .shead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+#scanclose, #dlclose { font-size: 20px; line-height: 1; color: var(--dim); padding: 2px 8px; border-radius: 6px; }
+#scanclose:hover, #dlclose:hover { color: var(--text); background: var(--panel2); }
 .smsg { min-height: 20px; margin-bottom: 10px; }
 .sbar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin-bottom: 12px; }
 .sbar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .5s; }
@@ -348,3 +350,19 @@ input[type="range"]::-moz-range-thumb { width: 14px; height: 14px; border-radius
 }
 @media (hover: none) { #vol { display: none; } }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+/* ---------- offline (the app) ---------- */
+.smsg.dim { color: var(--dim); font-size: 12.5px; }
+.dllist { max-height: 40vh; overflow-y: auto; margin-bottom: 10px; }
+.dlrow { display: flex; align-items: center; gap: 10px; padding: 5px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.dlrow .dn { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dlrow .ds { font: 12px var(--mono); color: var(--dim); }
+.dlrow.bad .ds { color: var(--danger); }
+.dlrow button { color: var(--dim); font-size: 18px; line-height: 1; padding: 0 6px; }
+.offmark { display: none; font-style: normal; color: var(--accent); margin-right: 5px; font-size: 12px; }
+.trk.off .offmark { display: inline; }
+.trk.dl { background: linear-gradient(90deg, rgba(79, 214, 214, .16) var(--p, 0%), transparent var(--p, 0%)); }
+@media (max-width: 720px) {
+  #offbtn, #dlbtn { padding: 8px 10px; }
+  #dlpanel { top: 96px; right: 12px; }
+}

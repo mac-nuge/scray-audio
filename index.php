@@ -32,6 +32,8 @@ $v = static fn(string $f): string => (string)@filemtime(__DIR__ . '/' . $f);
     <a href="#/playlists" data-tab="playlists">Playlists</a>
   </nav>
   <form id="searchform" role="search"><input id="search" type="search" placeholder="Search" autocomplete="off" enterkeyhint="search"></form>
+  <button id="offbtn" type="button" hidden aria-pressed="false" title="Show only what is saved on this phone"><span class="ic" aria-hidden="true">⤓</span> Offline <span id="offcount"></span></button>
+  <button id="dlbtn" type="button" hidden aria-haspopup="dialog" aria-expanded="false" title="Downloads"><span class="ic" aria-hidden="true">⇩</span><span id="dllabel"></span></button>
   <button id="scanbtn" type="button" title="Library scan" aria-haspopup="dialog" aria-expanded="false"><span class="ic" aria-hidden="true">⟳</span><span id="scanlabel"></span></button>
   <button id="shuffleall" type="button" title="Shuffle the whole library">🔀 Shuffle all</button>
 </header>
@@ -43,6 +45,14 @@ $v = static fn(string $f): string => (string)@filemtime(__DIR__ . '/' . $f);
   <dl id="scannums" class="snums"></dl>
   <div id="scanwarn" class="swarn" hidden></div>
   <div class="sbtns"><button id="scango" type="button" class="primary">Scan library now</button><button id="scanrefresh" type="button" hidden>Refresh this page’s list</button></div>
+</section>
+
+<section id="dlpanel" hidden role="dialog" aria-label="Downloads">
+  <div class="shead"><b>Offline</b><button id="dlclose" type="button" aria-label="Close">×</button></div>
+  <div id="dlmsg" class="smsg"></div>
+  <div id="dllist" class="dllist"></div>
+  <div id="dlfolder" class="smsg dim"></div>
+  <div class="sbtns"><button id="dlcancel" type="button" hidden>Cancel all</button><button id="dlretry" type="button" hidden>Retry failed</button><button id="dlfolderbtn" type="button">Choose folder…</button></div>
 </section>
 
 <main id="view" tabindex="-1"></main>
@@ -80,6 +90,8 @@ $v = static fn(string $f): string => (string)@filemtime(__DIR__ . '/' . $f);
 
 <script src="/scray/scray-session.js"></script>
 <script src="/scray/scray-version.js"></script>
+<script src="app.js?v=<?= $v('app.js') ?>"></script>
+<script src="offline.js?v=<?= $v('offline.js') ?>"></script>
 <script src="audio.js?v=<?= $v('audio.js') ?>"></script>
 </body>
 </html>

@@ -127,6 +127,13 @@ def main():
     check("ping needs nothing", call("ping", cookie=False)[0] == 200)
     check("no session, no data", call("stats", cookie=False)[0] == 401)
     check("console key is accepted", call("stats", cookie=False, key="test-admin")[0] == 200)
+    DEV = "sd_" + "a" * 64
+    check("a paired phone's key is accepted", call("stats", cookie=False, key=DEV)[0] == 200)
+    check("a well-formed key that was never issued is refused", call("stats", cookie=False, key="sd_" + "b" * 64)[0] == 401)
+    check("a phone key can't use worker actions", call("audio_worker_start", cookie=False, key=DEV, body={})[0] == 401)
+    req = urllib.request.Request(API + "?action=stats", method="OPTIONS", headers={"Origin": "file://", "Access-Control-Request-Headers": "x-scray-key"})
+    with urllib.request.urlopen(req) as r:
+        check("CORS preflight answers 204 with the key header allowed", r.status == 204 and "X-Scray-Key" in r.headers.get("Access-Control-Allow-Headers", ""))
     check("the scanner key is not a session", call("stats", cookie=False, worker="test-worker-key")[0] == 401)
     check("a bad worker key is refused", call("audio_worker_start", cookie=False, worker="nope", body={})[0] == 401)
     check("a session can't use worker actions", call("audio_worker_start", body={})[0] == 401)
@@ -178,8 +185,21 @@ def main():
     check("search finds artists and albums", call("search", {"q": "compil"})[1]["albums"][0]["album"] == "Compilation")
     check("a % in a search is not a wildcard", call("search", {"q": "%"})[1]["tracks"] == [])
 
+    print("offline filter")
+    if shutil.which("node"):
+        r = subprocess.run(["node", os.path.join(REPO, "tests", "offline-parity.js"), API], capture_output=True, text=True)
+        print(r.stdout.rstrip())
+        check("the offline filter answers like the server", r.returncode == 0, r.stdout[-600:] + r.stderr[-300:])
+    else:
+        print("  skip node not installed")
+
     print("signed links")
-    tid = call("ls", {"path": "Music/Artist One/Album A"})[1]["tracks"][0]["id"]
+    first = call("ls", {"path": "Music/Artist One/Album A"})[1]["tracks"][0]
+    tid = first["id"]
+    check("a track carries its path and size (the app saves it under that path)", first["path"] == "Music/Artist One/Album A/01 - First.flac" and first["size"] > 0, str(first))
+    cu = call("cover_url", {"t": tid})[1]
+    check("cover_url gives a signed link the app can use as an image address", cu["ok"] and "md5=" in cu["url"] and cu["expires_in"] >= 60, str(cu))
+    check("cover_url for a track with no cover is 404", call("cover_url", {"t": 999999})[0] == 404)
     u = call("url", {"id": tid})[1]
     url = u["url"]
     check("url has a signature and an expiry", "md5=" in url and "expires=" in url and "/a/Music/Artist%20One/Album%20A/01%20-%20First.flac" in url, url)
