@@ -1,0 +1,20 @@
+# /etc/systemd/system/scray-audio-scan.service
+# One scan of /home/audio. Started by scray-audio-scan.timer, or by hand:
+#   systemctl start scray-audio-scan && journalctl -u scray-audio-scan -f
+# Settings in /etc/scray/audio-scan.env.
+[Unit]
+Description=Scray audio library scan (Storage Box /home/audio -> api.php)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/scray/audio-scan.env
+ExecStart=/usr/bin/python3 -u /opt/scray/scray-audio-scan.py
+TimeoutStartSec=infinity
+Nice=10
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes

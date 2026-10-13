@@ -1,0 +1,12 @@
+# /etc/systemd/system/scray-audio-scan.timer
+# A rescan every night. A scan with nothing new is only folder listings.
+[Unit]
+Description=Nightly Scray audio library scan
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
