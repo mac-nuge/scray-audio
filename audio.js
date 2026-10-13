@@ -1,9 +1,13 @@
 /* Scray audio :: the page. Browse (folders, artists, albums, genres, search), play, shuffle, queue.
- * One file, no libraries. Talks to api.php with the session cookie. */
+ * One file, no libraries. Talks to api.php with the session cookie - or, in the iOS app (app.js), with this phone's
+ * key. offline.js keeps the tracks saved on the phone and answers for them in Offline mode. */
 (function () {
   'use strict';
 
-  const API = 'api.php';
+  const APP = window.SCRAY_AUDIO || null;                    // set by app.js inside the iOS app, else null
+  const OFF = window.ScrayOffline && window.ScrayOffline.available ? window.ScrayOffline : null;
+  const apiUrl = () => (APP ? APP.api : 'api.php');
+  const authInit = () => (APP ? { credentials: 'omit', headers: APP.key ? { 'X-Scray-Key': APP.key } : {} } : { credentials: 'same-origin' });
   const SILENT = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
   const QUEUE_SHOWN = 200;   // the queue panel draws this many upcoming tracks, however long the queue is
 
@@ -61,22 +65,68 @@
     toastTimer = setTimeout(() => t.classList.remove('show'), bad ? 4500 : 2200);
   }
 
+  const LOCAL_ACTIONS = new Set(['ls', 'tracks', 'artists', 'albums', 'genres', 'search', 'stats']);
+
   async function api(action, params) {
+    if (OFF && offlineOn()) {                                   // Offline mode: what is saved on the phone
+      const local = OFF.local(action, params);
+      if (local) return local;
+    }
     const q = new URLSearchParams({ action, ...(params || {}) });
     let r, j;
-    try { r = await fetch(`${API}?${q}`, { credentials: 'same-origin' }); }
-    catch (e) { throw new Error('can’t reach the server'); }
+    try { r = await fetch(`${apiUrl()}?${q}`, authInit()); }
+    catch (e) {
+      if (OFF && LOCAL_ACTIONS.has(action) && OFF.count) { setOffline(true, 'Can’t reach the server - showing what’s saved on this phone'); return OFF.local(action, params); }
+      throw new Error('can’t reach the server');
+    }
     try { j = await r.json(); } catch (e) { throw new Error(`server answered ${r.status}`); }
+    if (r.status === 401 && APP) {
+      if (OFF && OFF.count && LOCAL_ACTIONS.has(action)) { setOffline(true, 'Not signed in - showing what’s saved on this phone'); return OFF.local(action, params); }
+      APP.signIn('This phone isn’t signed in (or was signed out). Sign in to reach the library.');
+    }
     if (!r.ok || !j.ok) throw new Error(j.error || `server answered ${r.status}`);
+    if (OFF && offlineOn() && action === 'playlist') j.tracks = j.tracks.filter(t => OFF.has(t.id));
     return j;
+  }
+
+  // Covers. In a browser the <img> carries the session cookie; in the app it can't send the key, so ask for a signed link.
+  const coverLinks = new Map();
+  const coverQueue = [];
+  let coverBusy = 0;
+  function coverPump() {
+    while (coverBusy < 6 && coverQueue.length) {
+      const { id, img } = coverQueue.shift();
+      if (!img.isConnected) continue;
+      coverBusy++;
+      api('cover_url', { t: id })
+        .then(j => { coverLinks.set(id, { url: j.url, until: Date.now() + (j.expires_in || 600) * 1000 }); img.src = j.url; })
+        .catch(() => img.remove())
+        .finally(() => { coverBusy--; coverPump(); });
+    }
+  }
+  const coverIO = 'IntersectionObserver' in window ? new IntersectionObserver(es => es.forEach(e => {
+    if (!e.isIntersecting) return;
+    coverIO.unobserve(e.target);
+    coverQueue.push({ id: +e.target.dataset.cover, img: e.target });
+    coverPump();
+  }), { rootMargin: '400px' }) : null;
+  function setCover(img, id) {
+    const local = OFF && OFF.coverUrl(id);
+    if (local) { img.src = local; return; }
+    if (!APP) { img.src = `api.php?action=cover&t=${id}`; return; }
+    const c = coverLinks.get(id);
+    if (c && c.until > Date.now()) { img.src = c.url; return; }
+    img.dataset.cover = id;
+    if (coverIO) coverIO.observe(img); else { coverQueue.push({ id, img }); coverPump(); }
   }
 
   function coverEl(trackId, cls) {
     const el = h('div', { class: 'cover ' + (cls || '') }, h('span', { text: '♪' }));
     if (trackId != null) {
-      const img = h('img', { src: `${API}?action=cover&t=${trackId}`, alt: '', loading: 'lazy', decoding: 'async' });
+      const img = h('img', { alt: '', loading: 'lazy', decoding: 'async' });
       img.addEventListener('error', () => img.remove());
       el.append(img);
+      setCover(img, trackId);
     }
     return el;
   }
@@ -105,6 +155,8 @@
   }
 
   async function getUrl(t, force) {
+    const saved = OFF && OFF.localUrl(t);                       // saved on this phone: play that, whatever the network says
+    if (saved) return saved;
     const c = P.urls.get(t.id);
     if (!force && c && Date.now() - c.at < (c.ttl - 300) * 1000) return c.url;
     const j = await api('url', { id: t.id });
@@ -141,7 +193,7 @@
 
   function prefetchNext() {   // sign the next link now so the change of track doesn't wait on the server
     const n = P.queue[P.idx + 1];
-    if (n && linkStale(n, 600)) getUrl(n).catch(() => {});
+    if (n && !(OFF && OFF.has(n.id)) && linkStale(n, 600)) getUrl(n).catch(() => {});
   }
 
   function skipAfterError(t) {
@@ -284,7 +336,7 @@
     if (t.album) sub.append(' · ', h('a', { href: `#/album/${enc(t.albumArtist)}/${enc(t.album)}`, text: t.album }));
     const cv = $('npcover');
     cv.replaceChildren(h('span', { text: '♪' }));
-    if (t.cover) { const img = h('img', { src: `${API}?action=cover&t=${t.id}`, alt: '' }); img.addEventListener('error', () => img.remove()); cv.append(img); }
+    if (t.cover) { const img = h('img', { alt: '' }); img.addEventListener('error', () => img.remove()); cv.append(img); setCover(img, t.id); }
     document.title = `${t.title} – ${t.artist || 'Scray audio'}`;
     $('tdur').textContent = fmtMs(t.ms);
     $('tcur').textContent = '0:00';
@@ -333,11 +385,14 @@
 
   function setMediaSession(t) {
     if (!('mediaSession' in navigator)) return;
-    const abs = new URL(`${API}?action=cover&t=${t.id}`, location.href).href;
-    navigator.mediaSession.metadata = new MediaMetadata({
-      title: t.title, artist: t.artist, album: t.album,
-      artwork: t.cover ? [{ src: abs, sizes: '512x512' }] : [],
-    });
+    const meta = (src) => { navigator.mediaSession.metadata = new MediaMetadata({ title: t.title, artist: t.artist, album: t.album, artwork: src ? [{ src, sizes: '512x512' }] : [] }); };
+    if (!APP) { meta(t.cover ? new URL(`api.php?action=cover&t=${t.id}`, location.href).href : null); return; }
+    meta(null);                                                  // the app: the lock screen gets the cover once its signed link is back
+    if (t.cover) {
+      const local = OFF && OFF.coverUrl(t.id);
+      if (local) meta(local);
+      else api('cover_url', { t: t.id }).then(j => { if (P.queue[P.idx] === t) meta(j.url); }).catch(() => {});
+    }
   }
   if ('mediaSession' in navigator) {
     const set = (a, f) => { try { navigator.mediaSession.setActionHandler(a, f); } catch (e) { /* unsupported action */ } };
@@ -460,9 +515,9 @@
     const multiDisc = o.discs && new Set(tracks.map(t => t.disc || 1)).size > 1;
     tracks.forEach((t, i) => {
       if (multiDisc && (t.disc || 1) !== disc) { disc = t.disc || 1; box.append(h('div', { class: 'disc', text: `Disc ${disc}` })); }
-      const row = h('div', { class: 'trk', role: 'button', tabindex: '0', dataset: { id: t.id } },
+      const row = h('div', { class: 'trk' + (OFF && OFF.has(t.id) ? ' off' : ''), role: 'button', tabindex: '0', dataset: { id: t.id } },
         h('span', { class: 'num' }, h('span', { text: String(o.trackNumbers ? (t.no ?? i + 1) : i + 1) })),
-        h('span', { class: 'ttl' }, h('span', { class: 't', text: t.title }), h('span', { class: 'sub', text: (o.noAlbum ? [showArtist ? t.artist : ''] : [t.artist, t.album]).filter(Boolean).join(' · ') })),
+        h('span', { class: 'ttl' }, h('span', { class: 't' }, OFF ? h('i', { class: 'offmark', title: 'Saved on this phone', text: '⤓' }) : null, t.title), h('span', { class: 'sub', text: (o.noAlbum ? [showArtist ? t.artist : ''] : [t.artist, t.album]).filter(Boolean).join(' · ') })),
         h('span', { class: 'art', text: t.artist }),
         h('span', { class: 'alb', text: t.album }),
         h('span', { class: 'dur', text: fmtMs(t.ms) }),
@@ -513,6 +568,10 @@
         class: 'btn', text: '＋ Playlist', title: 'Add these tracks to a playlist', 'aria-haspopup': 'menu',
         onclick: e => { const b = e.currentTarget; openPicker({ el: b }, b, async () => (await getTracks()).map(t => t.id)); },
       }),
+      OFF && !(o && o.noOffline) ? h('button', {
+        class: 'btn', text: '⤓ Offline', title: 'Save these tracks on this phone (or remove them)', 'aria-haspopup': 'menu',
+        onclick: e => offlineMenu(getTracks, e.currentTarget),
+      }) : null,
       extra);
   }
 
@@ -689,6 +748,9 @@
     if (t.albumArtist) items.push({ label: 'Go to artist', hint: t.albumArtist, onclick: go(`#/artist/${enc(t.albumArtist)}`) });
     if (t.artist && t.artist !== t.albumArtist) items.push({ label: 'More by', hint: t.artist, onclick: go(`#/search/${enc(t.artist)}`) });
     if (t.folder) items.push({ label: 'Show in folder', hint: t.folder.split('/').pop(), onclick: go(`#/f/${enc(t.folder)}`) });
+    if (OFF && t.path) items.push({ sep: true }, OFF.has(t.id)
+      ? { label: 'Remove from offline', onclick: () => removeOffline(async () => [t]) }
+      : { label: 'Save offline', onclick: () => saveOffline(async () => [t]) });
     items.push({ sep: true });
     items.push({ label: 'Add to playlist', arrow: true, keep: true, onclick: () => showPicker(async () => [t.id], items) });
     if (ctx.playlist && t.entry) {
@@ -956,7 +1018,8 @@
 
   async function apiPost(action, body) {
     let r, j;
-    try { r = await fetch(`${API}?action=${action}`, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }); }
+    const ai = authInit();
+    try { r = await fetch(`${apiUrl()}?action=${action}`, { method: 'POST', credentials: ai.credentials, headers: { 'Content-Type': 'application/json', ...ai.headers }, body: JSON.stringify(body || {}) }); }
     catch (e) { throw new Error('can’t reach the server'); }
     try { j = await r.json(); } catch (e) { throw new Error(`server answered ${r.status}`); }
     if (!r.ok || !j.ok) throw new Error(j.error || `server answered ${r.status}`);
@@ -1081,8 +1144,121 @@
   });
   window.addEventListener('hashchange', closeMenu);
 
+  // ------------------------------------------------------- offline (the app)
+  // Tracks saved on the phone: a toggle that shows only those, save/remove buttons, and a panel for the downloads
+  // in progress. Everything here is inert in a browser (OFF is null and the buttons stay hidden).
+  const mode = { off: !!store.get('offline', false), panel: false };
+  const offlineOn = () => !!(OFF && mode.off);
+  const mb = b => (b >= 1e9 ? (b / 1e9).toFixed(1) + ' GB' : Math.max(1, Math.round(b / 1e6)) + ' MB');
+
+  function setOffline(on, why, rerender) {
+    if (!OFF || mode.off === on) return;
+    mode.off = on;
+    store.set('offline', on);
+    paintOffline();
+    if (why) toast(why);
+    if (rerender) route();
+  }
+
+  const dlCtx = OFF ? {
+    getUrl: async t => (await api('url', { id: t.id })).url,
+    getCoverUrl: async t => (await api('cover_url', { t: t.id })).url,
+  } : null;
+
+  async function saveOffline(getTracks) {
+    try {
+      const tracks = (await getTracks()).filter(t => t.path && !OFF.has(t.id));
+      if (!tracks.length) { toast('Already saved on this phone'); return; }
+      const bytes = tracks.reduce((a, t) => a + (t.size || 0), 0);
+      let free = null;
+      try { free = (await OFF.storage()).free; } catch (e) { /* unknown: carry on */ }
+      if (free != null && bytes > free - 200e6) { toast(`Not enough space: ${plural(tracks.length, 'track')} need ${mb(bytes)} and ${mb(free)} is free`, true); return; }
+      if (tracks.length > 1) {
+        const ok = await dialog({ title: 'Save offline?', text: `${plural(tracks.length, 'track')}, about ${mb(bytes)}${free != null ? ` (${mb(free)} free on this phone)` : ''}.`, ok: 'Save' });
+        if (!ok) return;
+      }
+      const n = await OFF.download(tracks, dlCtx);
+      toast(n ? `Saving ${plural(n, 'track')}…` : 'Already on its way');
+    } catch (e) { toast(e.message, true); }
+  }
+
+  async function removeOffline(getTracks) {
+    try {
+      const tracks = (await getTracks()).filter(t => OFF.has(t.id));
+      if (!tracks.length) { toast('None of these are saved on this phone'); return; }
+      if (tracks.length > 1 && !await dialog({ title: 'Remove from this phone?', text: `${plural(tracks.length, 'saved track')} will be deleted from this phone. They stay in the library.`, ok: 'Remove', danger: true })) return;
+      await OFF.remove(tracks);
+      toast(`Removed ${plural(tracks.length, 'track')} from this phone`);
+      if (offlineOn()) route();
+    } catch (e) { toast(e.message, true); }
+  }
+
+  function offlineMenu(getTracks, btn) {
+    openMenu([
+      { label: 'Save offline', onclick: () => saveOffline(getTracks) },
+      { label: 'Remove from offline', danger: true, onclick: () => removeOffline(getTracks) },
+    ], { el: btn }, btn);
+  }
+
+  function paintOffline() {
+    if (!OFF) return;
+    $('offbtn').hidden = false;
+    $('offbtn').setAttribute('aria-pressed', String(mode.off));
+    $('offbtn').classList.toggle('on', mode.off);
+    $('offcount').textContent = OFF.count ? String(OFF.count) : '';
+    const jobs = OFF.jobs(), live = OFF.active(), bad = jobs.filter(j => j.state === 'error').length;
+    const byId = new Map(jobs.map(j => [j.track.id, j]));
+    document.querySelectorAll('.trk[data-id]').forEach(r => {
+      const id = +r.dataset.id, j = byId.get(id);
+      r.classList.toggle('off', OFF.has(id));
+      const busy = !!j && (j.state === 'queued' || j.state === 'active');
+      r.classList.toggle('dl', busy);
+      if (busy) r.style.setProperty('--p', j.total ? Math.min(100, j.received / j.total * 100) + '%' : '0%');
+    });
+    const b = $('dlbtn');
+    b.hidden = !(live || bad || mode.panel);
+    b.classList.toggle('busy', live > 0);
+    b.classList.toggle('bad', !live && bad > 0);
+    $('dllabel').textContent = live ? String(live) : bad ? '!' : '';
+    if (mode.panel) paintDl(jobs, live, bad);
+  }
+
+  function paintDl(jobs, live, bad) {
+    const list = jobs.filter(j => j.state !== 'cancelled');
+    const done = list.filter(j => j.state === 'done').length;
+    $('dlmsg').textContent = live ? `Saving ${plural(live, 'track')}…` : bad ? `${plural(bad, 'track')} failed` : 'Nothing downloading';
+    $('dlfolder').textContent = OFF.folder ? `Saved in “${OFF.folder}/Offline” · ${plural(OFF.count, 'track')}` : 'No folder chosen yet - you’ll be asked when you save something.';
+    $('dllist').replaceChildren(...list.filter(j => j.state !== 'done').slice(0, 40).map(j => h('div', { class: 'dlrow' + (j.state === 'error' ? ' bad' : '') },
+      h('span', { class: 'dn', text: j.track.title }),
+      h('span', { class: 'ds', text: j.state === 'error' ? (j.error || 'failed') : j.state === 'queued' ? 'waiting' : j.total ? Math.round(Math.min(100, j.received / j.total * 100)) + '%' : '…' }),
+      j.state === 'error' ? null : h('button', { type: 'button', 'aria-label': 'Cancel', text: '×', onclick: () => OFF.cancel(j.track.id) }))));
+    if (done && !live) $('dlmsg').textContent += ` · ${done} done`;
+    $('dlretry').hidden = !bad;
+    $('dlcancel').hidden = !live;
+  }
+
+  function setDlPanel(open) {
+    mode.panel = open;
+    $('dlpanel').hidden = !open;
+    $('dlbtn').setAttribute('aria-expanded', String(open));
+    if (open) $('dlpanel').style.top = ($('top').getBoundingClientRect().bottom + 6) + 'px';
+    paintOffline();
+  }
+
+  if (OFF) {
+    $('offbtn').addEventListener('click', () => setOffline(!mode.off, '', true));
+    $('dlbtn').addEventListener('click', () => setDlPanel(!mode.panel));
+    $('dlclose').addEventListener('click', () => setDlPanel(false));
+    $('dlcancel').addEventListener('click', () => OFF.cancelAll());
+    $('dlretry').addEventListener('click', () => OFF.retryFailed(dlCtx));
+    $('dlfolderbtn').addEventListener('click', () => OFF.pickFolder().then(() => paintOffline()).catch(e => toast(e.message, true)));
+    OFF.onChange(paintOffline);
+  }
+
   paintControls();
   paintPlay();
-  route();
-  scanTick();
+  const start = () => { paintOffline(); route(); scanTick(); };
+  if (OFF) {
+    OFF.init().then(() => { if (APP && !APP.key && OFF.count) mode.off = true; }).catch(() => {}).finally(start);
+  } else start();
 })();

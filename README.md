@@ -32,11 +32,13 @@ track (valid an hour; the player asks for a fresh one if it expires mid-pause).
 | File | |
 |---|---|
 | `index.php`, `audio.js`, `audio.css` | the page (no libraries) |
+| `offline.js`, `app.js` | saving tracks on the phone and the Offline filter; the iOS app's sign-in and setup. Both do nothing in a browser tab |
 | `api.php` | the API: browse, search, signed links, and the scanner's `audio_worker_*` actions |
 | `audio-config.php` | where secrets and the database live (no secrets in it) |
 | `gateway/scray-audio-scan.py` | the scanner; `.service` + `.timer` run it nightly; `audio-scan.env.example` |
 | `gateway/scray-audio-scan-poll.*` | a service + timer that checks every 30 s whether the page's **Scan now** button was pressed |
-| `tests/smoke.py` | end-to-end test with a fake box; run by CI |
+| `tests/smoke.py` | end-to-end test with a fake box; run by CI. Includes `tests/offline-parity.js` (the Offline filter must answer like the server) |
+| `tests/ui_offline.py` | the Offline filter and saving, in a real browser with a pretend app behind it (needs Playwright; run by hand) |
 | `VERSION`, `scray-changelog.md` | version name and the reasoning log, as in the other Scray repos |
 
 ## Setting it up
@@ -88,13 +90,26 @@ of its tracks. Inside a playlist the menu also has Move up / Move down / Remove.
 (`scray-data/audio.sqlite`), so they are the same on every device. A track is remembered by its place in the library; if a
 file is moved to a new path it drops out of the playlist (the page says how many are hidden, with a button to clear them).
 
+**Offline (the iOS app).** In the app, **Save offline** is in the track menu, and **⤓ Offline** next to Play / Shuffle saves or
+removes a whole album, folder, artist or playlist (it asks first, with the size and the free space). Saved files go in
+`<the folder you pick>/Offline/<the track's library path>` (covers in `Offline/.covers/`), the same layout Scray Native uses for
+its downloads, so they are ordinary files you can see in Files. The **Offline** toggle in the header shows only what is saved:
+folders, artists, albums, genres and search all work from the phone's own list, with no connection. A saved track always plays
+from the phone. Without a connection, or when signed out, the page switches to Offline by itself.
+
+**Phone keys.** The app signs in the way Scray's other apps do (password and authenticator code to Scray's `device_pair`) and
+sends the key it gets as `X-Scray-Key`. `api.php` accepts those keys by looking them up in `scray-data/scray_devices.json`
+(the same file, hashed, that Scray's twofactor.php manages), so signing a phone out there cuts it off here too. The API also
+sends CORS headers, because the app's page is not on the site's origin.
+
 Supported: mp3, flac, m4a, aac, ogg, opus, wav - whatever the browser can decode. Safari doesn't play
 ogg/opus.
 
 ## Developing
 
 ```bash
-python3 tests/smoke.py     # needs php, ffmpeg, python3-mutagen
+python3 tests/smoke.py     # needs php, ffmpeg, python3-mutagen, node
+python3 tests/ui_offline.py   # optional: needs `pip install playwright` and a Chromium
 ```
 
 `tests/stub-data/` stands in for Scray's `scray_auth.php` / `scray_secrets.php`. `SCRAY_AUDIO_DATA_DIR`
@@ -106,4 +121,4 @@ usual ones).
 ## Not done yet
 
 Embedded cover art (folder `cover.jpg` is used), gapless playback, saving the queue across a reload,
-playlists, play counts, other-device sync.
+play counts, other-device sync, playlists offline (they need the server; Offline mode shows only their saved tracks).
