@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""
+End-to-end smoke test: no network, no real box.
+
+  python3 tests/smoke.py
+
+Makes a few tiny audio files with ffmpeg, starts the fake box+gateway
+(tests/fake_box.py) and `php -S` for the real api.php (with the stub auth in
+tests/stub-data), runs the real scanner against them, then checks what the api
+says - including that a signed URL plays, seeks, and a forged one is refused.
+Needs: php, python3-mutagen, ffmpeg.
+"""
+import base64, hashlib, json, os, shutil, signal, subprocess, sys, tempfile, time, urllib.error, urllib.parse, urllib.request
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WORK = os.path.join(REPO, "tests", ".work")
+BOX = os.path.join(WORK, "box")
+DB = os.path.join(WORK, "audio.sqlite")
+API_PORT, BOX_PORT = 8098, 8099
+API = f"http://127.0.0.1:{API_PORT}/api.php"
+procs = []
+fails = []
+
+
+def check(name, cond, extra=""):
+    print(("  ok   " if cond else "  FAIL ") + name + (f"   {extra}" if extra and not cond else ""))
+    if not cond:
+        fails.append(name)
+
+
+def ff(out, tags, codec, *more):
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    cmd = ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=3"]
+    for k, v in tags.items():
+        cmd += ["-metadata", f"{k}={v}"]
+    subprocess.run(cmd + ["-codec:a", codec, *more, out], check=True)
+
+
+def make_library():
+    shutil.rmtree(BOX, ignore_errors=True)
+    a = os.path.join(BOX, "Music", "Artist One", "Album A")
+    ff(os.path.join(a, "02 - Second.flac"), dict(title="Second", artist="Artist One", album="Album A", track="2/2", date="1999", genre="Ambient"), "flac")
+    ff(os.path.join(a, "01 - First.flac"), dict(title="First", artist="Artist One", album="Album A", track="1/2", date="1999", genre="Ambient"), "flac")
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=64x64", "-frames:v", "1", os.path.join(a, "cover.jpg")], check=True)
+    v = os.path.join(BOX, "Music", "Various", "Compilation")
+    ff(os.path.join(v, "01 - Tune.mp3"), dict(title="Tune", artist="Someone", album_artist="Various Artists", album="Compilation", track="1", date="2005", genre="Pop"), "libmp3lame", "-b:a", "128k")
+    ff(os.path.join(v, "02 - Other.mp3"), dict(title="Other", artist="Someone Else", album_artist="Various Artists", album="Compilation", track="2", date="2005", genre="Pop"), "libmp3lame", "-b:a", "128k", "-write_xing", "0")
+    ff(os.path.join(BOX, "Music", "Singles", "loose track.mp3"), {}, "libmp3lame", "-b:a", "128k")
+    ff(os.path.join(BOX, "Music", "Édith & Co's", "Café – live.mp3"), dict(title="Café", artist="Édith", album="Live", date="1960"), "libmp3lame", "-b:a", "128k")
+    open(os.path.join(BOX, "Music", "notes.txt"), "w").write("not audio")
+    open(os.path.join(BOX, "Music", ".hidden.mp3"), "w").write("skip me")
+
+
+def start(cmd, env=None):
+    p = subprocess.Popen(cmd, env={**os.environ, **(env or {})}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=os.setsid)
+    procs.append(p)
+    return p
+
+
+def wait_up(url, tries=50):
+    for _ in range(tries):
+        try:
+            urllib.request.urlopen(url, timeout=1)
+            return True
+        except urllib.error.HTTPError:
+            return True
+        except Exception:
+            time.sleep(0.1)
+    return False
+
+
+def call(action, params=None, cookie=True, key=None, body=None, worker=None):
+    q = urllib.parse.urlencode({"action": action, **(params or {})})
+    h = {}
+    if cookie:
+        h["Cookie"] = "scray_test_session=1"
+    if key:
+        h["X-Scray-Key"] = key
+    if worker:
+        h["X-Scray-Worker"] = worker
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode()
+        h["Content-Type"] = "application/json"
+    req = urllib.request.Request(f"{API}?{q}", data=data, headers=h, method="POST" if data else "GET")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
+
+
+def scan(extra_env=None):
+    env = {**os.environ, "SCRAY_AUDIO_API": API, "SCRAY_AUDIO_WORKER_KEY": "test-worker-key",
+           "SCRAY_DAV_URL": f"http://127.0.0.1:{BOX_PORT}", "SCRAY_DAV_USER": "scan", "SCRAY_DAV_PASS": "pw", **(extra_env or {})}
+    r = subprocess.run([sys.executable, os.path.join(REPO, "gateway", "scray-audio-scan.py")], env=env, capture_output=True, text=True)
+    return r.returncode, r.stdout + r.stderr
+
+
+def main():
+    shutil.rmtree(WORK, ignore_errors=True)
+    os.makedirs(WORK)
+    print("making a little library")
+    make_library()
+    start([sys.executable, os.path.join(REPO, "tests", "fake_box.py"), BOX, str(BOX_PORT)])
+    start(["php", "-S", f"127.0.0.1:{API_PORT}", "-t", REPO],
+          {"SCRAY_AUDIO_DATA_DIR": os.path.join(REPO, "tests", "stub-data"), "SCRAY_AUDIO_TEST_DB": DB})
+    assert wait_up(f"{API}?action=ping") and wait_up(f"http://127.0.0.1:{BOX_PORT}/x"), "servers did not start"
+
+    print("auth")
+    check("ping needs nothing", call("ping", cookie=False)[0] == 200)
+    check("no session, no data", call("stats", cookie=False)[0] == 401)
+    check("console key is accepted", call("stats", cookie=False, key="test-admin")[0] == 200)
+    check("the scanner key is not a session", call("stats", cookie=False, worker="test-worker-key")[0] == 401)
+    check("a bad worker key is refused", call("audio_worker_start", cookie=False, worker="nope", body={})[0] == 401)
+    check("a session can't use worker actions", call("audio_worker_start", body={})[0] == 401)
+
+    print("scanning")
+    code, out = scan()
+    print("   " + out.strip().splitlines()[-1])
+    check("scan exits 0", code == 0, out)
+    s = call("stats")[1]
+    check("6 audio files found (not the txt, not the dotfile)", s["tracks"] == 6, str(s))
+    check("none left untagged", s["untagged"] == 0, str(s))
+
+    code, out2 = scan()
+    check("rescan runs", code == 0, out2)
+    check("rescan reads no tags (nothing changed)", "6 files, 0 tagged" in out2, out2)
+
+    print("folders")
+    ls = call("ls")[1]
+    check("root has Music", [f["name"] for f in ls["folders"]] == ["Music"] and ls["folders"][0]["tracks"] == 6, str(ls["folders"]))
+    ls = call("ls", {"path": "Music"})[1]
+    names = [f["name"] for f in ls["folders"]]
+    check("sub-folders, natural order", names == ["Artist One", "Singles", "Various", "Édith & Co's"], str(names))
+    ls = call("ls", {"path": "Music/Artist One/Album A"})[1]
+    check("tracks in track order", [t["title"] for t in ls["tracks"]] == ["First", "Second"], str(ls["tracks"]))
+    check("folder art found", ls["art"] is not None)
+    check("track facts", ls["tracks"][0]["year"] == 1999 and ls["tracks"][0]["genre"] == "Ambient" and ls["tracks"][0]["no"] == 1 and 2900 < ls["tracks"][0]["ms"] < 3100, str(ls["tracks"][0]))
+    ls = call("ls", {"path": "Music/Édith & Co's"})[1]
+    check("non-ASCII folder and file", len(ls["tracks"]) == 1 and ls["tracks"][0]["title"] == "Café", str(ls))
+    ls = call("ls", {"path": "Music/Singles"})[1]
+    check("untagged file falls back to its name", ls["tracks"][0]["title"] == "loose track" and ls["tracks"][0]["albumArtist"] == "Unknown artist", str(ls["tracks"]))
+
+    print("metadata views")
+    artists = [a["name"] for a in call("artists")[1]["artists"]]
+    check("artists", artists == ["Artist One", "Édith", "Unknown artist", "Various Artists"] or sorted(artists) == sorted(["Artist One", "Édith", "Unknown artist", "Various Artists"]), str(artists))
+    albums = call("albums")[1]["albums"]
+    check("albums skip the loose tracks", sorted(a["album"] for a in albums) == ["Album A", "Compilation", "Live"], str(albums))
+    comp = [a for a in albums if a["album"] == "Compilation"][0]
+    check("compilation grouped under its album artist", comp["artist"] == "Various Artists" and comp["tracks"] == 2, str(comp))
+    t = call("tracks", {"artist": "Various Artists", "album": "Compilation"})[1]["tracks"]
+    check("album tracks in order, with their own artists", [(x["title"], x["artist"]) for x in t] == [("Tune", "Someone"), ("Other", "Someone Else")], str(t))
+    check("mp3 without a Xing header still gets a sane length", all(2800 < x["ms"] < 3300 for x in t), str(t))
+    check("genres", [g["name"] for g in call("genres")[1]["genres"]] == ["Ambient", "Pop"])
+    check("tracks by genre", len(call("tracks", {"genre": "Pop"})[1]["tracks"]) == 2)
+    check("tracks under a folder, recursive", len(call("tracks", {"folder": "Music/Artist One"})[1]["tracks"]) == 2 and len(call("tracks", {"folder": "Music"})[1]["tracks"]) == 6)
+    check("search ignores accents and case", [x["title"] for x in call("search", {"q": "edith CAFE"})[1]["tracks"]] == ["Café"])
+    check("search finds an artist by unaccented name", [a["name"] for a in call("search", {"q": "edith"})[1]["artists"]] == ["Édith"])
+    r = call("search", {"q": "second album"})[1]
+    check("search: every word must match somewhere", [x["title"] for x in r["tracks"]] == ["Second"], str(r["tracks"]))
+    check("search finds artists and albums", call("search", {"q": "compil"})[1]["albums"][0]["album"] == "Compilation")
+    check("a % in a search is not a wildcard", call("search", {"q": "%"})[1]["tracks"] == [])
+
+    print("signed links")
+    tid = call("ls", {"path": "Music/Artist One/Album A"})[1]["tracks"][0]["id"]
+    u = call("url", {"id": tid})[1]
+    url = u["url"]
+    check("url has a signature and an expiry", "md5=" in url and "expires=" in url and "/a/Music/Artist%20One/Album%20A/01%20-%20First.flac" in url, url)
+    exp = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["expires"][0]
+    want = base64.urlsafe_b64encode(hashlib.md5(f"{exp}/a/Music/Artist One/Album A/01 - First.flac testsecret".encode()).digest()).decode().rstrip("=")
+    check("signature matches the gateway's recipe (decoded path, one space)", f"md5={want}" in url, url)
+    req = urllib.request.Request(url, headers={"Range": "bytes=100-199"})
+    with urllib.request.urlopen(req) as r:
+        check("a Range request gets 206 and 100 bytes", r.status == 206 and len(r.read()) == 100)
+    try:
+        urllib.request.urlopen(url[:-1] + ("0" if url[-1] != "0" else "1")); bad = 200
+    except urllib.error.HTTPError as e:
+        bad = e.code
+    check("a changed link is refused (403)", bad == 403, str(bad))
+    ed = call("ls", {"path": "Music/Édith & Co's"})[1]["tracks"][0]["id"]
+    with urllib.request.urlopen(call("url", {"id": ed})[1]["url"]) as r:
+        check("a name with accents, &, ' and a dash plays", r.status == 200)
+    req = urllib.request.Request(f"{API}?action=cover&t={tid}", headers={"Cookie": "scray_test_session=1"})
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k): return None
+    try:
+        urllib.request.build_opener(NoRedirect).open(req)
+        code, loc = 200, ""
+    except urllib.error.HTTPError as e:
+        code, loc = e.code, e.headers.get("Location", "")
+    check("cover redirects to a signed link", code == 302 and "/a/Music/Artist%20One/Album%20A/cover.jpg?md5=" in loc, f"{code} {loc}")
+    nocover = call("ls", {"path": "Music/Édith & Co's"})[1]["tracks"][0]["id"]
+    try:
+        urllib.request.build_opener(NoRedirect).open(urllib.request.Request(f"{API}?action=cover&t={nocover}", headers={"Cookie": "scray_test_session=1"})); c404 = 200
+    except urllib.error.HTTPError as e:
+        c404 = e.code
+    check("a track with no folder art: cover is 404", c404 == 404, str(c404))
+    check("unknown track: url is 404", call("url", {"id": 999999})[0] == 404)
+
+    print("files that go away")
+    os.remove(os.path.join(BOX, "Music", "Singles", "loose track.mp3"))
+    code, out = scan()
+    check("a complete rescan removes what's gone", code == 0 and call("stats")[1]["tracks"] == 5, out)
+    code, out = scan({"SCRAY_SCAN_ROOT": "Music/Artist One"})
+    check("a partial scan removes nothing", call("stats")[1]["tracks"] == 5 and code == 0, out)
+    shutil.rmtree(os.path.join(BOX, "Music", "Various"))
+    shutil.rmtree(os.path.join(BOX, "Music", "Édith & Co's"))
+    shutil.rmtree(os.path.join(BOX, "Music", "Artist One"))
+    # Small libraries are exempt from the "more than half" guard, so test that rule directly:
+    st, r = call("audio_worker_finish", cookie=False, worker="test-worker-key", body={"scan_id": 1, "files_seen": 0, "complete": True})
+    check("a walk that saw nothing prunes nothing", r.get("pruned") == 0 and r.get("skipped_prune"), str(r))
+
+    print("changed files are re-read")
+    ff(os.path.join(BOX, "Music", "Artist One", "Album A", "01 - First.flac"), dict(title="Renamed", artist="Artist One", album="Album A", track="1/1"), "flac")
+    code, out = scan()
+    r = call("tracks", {"folder": "Music/Artist One"})[1]["tracks"]
+    check("a changed file gets new tags", [x["title"] for x in r] == ["Renamed"], str(r))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    finally:
+        for p in procs:
+            try:
+                os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+            except Exception:
+                pass
+    print()
+    if fails:
+        print(f"{len(fails)} FAILED: " + "; ".join(fails))
+        sys.exit(1)
+    print("all good")

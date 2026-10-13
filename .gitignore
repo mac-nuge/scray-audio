@@ -1,0 +1,21 @@
+# Secrets and anything that holds real data - never commit these.
+# The real ones live outside the web root, in scray-data/ on Hostinger and
+# /etc/scray/ on the gateway.
+scray_secrets.php
+scray_auth.php
+*.env
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# The CI stand-ins for the two Scray files above are the one exception.
+!tests/stub-data/scray_secrets.php
+!tests/stub-data/scray_auth.php
+
+# Local junk
+__pycache__/
+*.pyc
+node_modules/
+.DS_Store
+Thumbs.db
+tests/.work/

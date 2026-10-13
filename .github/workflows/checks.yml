@@ -1,0 +1,28 @@
+name: checks
+
+# Lint, then run the end-to-end smoke test (tests/smoke.py): a fake Storage Box,
+# the real api.php under php -S, and the real scanner. No secrets, no network.
+on:
+  push:
+    branches: [staging, main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, mbstring, intl, zlib
+          tools: none
+      - name: Tools for the smoke test
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg python3-mutagen
+      - name: Lint
+        run: |
+          for f in *.php tests/stub-data/*.php; do php -l "$f"; done
+          node --check audio.js
+          python3 -m py_compile gateway/scray-audio-scan.py tests/fake_box.py tests/smoke.py
+      - name: Smoke test
+        run: python3 tests/smoke.py
