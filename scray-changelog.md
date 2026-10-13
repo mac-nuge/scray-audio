@@ -7,6 +7,14 @@ named `test:` until it has been tried and then `stable:`. Record the reasoning, 
 
 ## Entries
 
+### audio 1.1 — test: scanner base64 bodies
+<!-- 2026-10-13T20:18Z -->
+- **Asked:** the first full scan stopped at about 1,400 files with a plain-text `403 Forbidden` from `audio_worker_seen`.
+- **Why I think it happened:** api.php never answers in plain text (it always sends JSON), so the 403 came from in front of PHP, most likely Hostinger's web firewall inspecting the request body. The body held file paths, and one path probably matched a rule (names with `../`, `select ... from`, `<`, and so on). The same call worked on the earlier batches, which fits a single odd file name. Not confirmed: I haven't seen which file it was.
+- **Fix:** the scanner now sends every payload base64-encoded (`X-Scray-Enc: b64`, `text/plain`) and api.php decodes it before reading the JSON. A firewall has nothing to match on in base64. Plain JSON bodies are still accepted. The `..` path-segment check in api.php is unchanged.
+- **Checked:** `tests/smoke.py` now posts a path containing `x../select * from x/<b>.mp3` in base64, and a plain body, and the scanner itself runs through the base64 path. All pass. **Not tried:** the real firewall, so whether this clears the 403 is only known once the full scan is re-run.
+- Deploy: this changes `api.php` (Hostinger) and `gateway/scray-audio-scan.py` (copy to `/opt/scray/` on the gateway).
+
 ### audio 1.0 — test: first cut
 <!-- 2026-10-13T19:54Z -->
 - **Asked:** a simple web interface, desktop and mobile browser, to browse (by folder or by metadata), play and shuffle the mp3 and flac files in `/home/audio` on the Hetzner box; borrow as much of Scray's infrastructure as possible.

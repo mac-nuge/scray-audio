@@ -69,7 +69,7 @@ def wait_up(url, tries=50):
     return False
 
 
-def call(action, params=None, cookie=True, key=None, body=None, worker=None):
+def call(action, params=None, cookie=True, key=None, body=None, worker=None, b64=False):
     q = urllib.parse.urlencode({"action": action, **(params or {})})
     h = {}
     if cookie:
@@ -82,6 +82,10 @@ def call(action, params=None, cookie=True, key=None, body=None, worker=None):
     if body is not None:
         data = json.dumps(body).encode()
         h["Content-Type"] = "application/json"
+        if b64:
+            data = base64.b64encode(data)
+            h["X-Scray-Enc"] = "b64"
+            h["Content-Type"] = "text/plain"
     req = urllib.request.Request(f"{API}?{q}", data=data, headers=h, method="POST" if data else "GET")
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
@@ -106,6 +110,15 @@ def main():
     start(["php", "-S", f"127.0.0.1:{API_PORT}", "-t", REPO],
           {"SCRAY_AUDIO_DATA_DIR": os.path.join(REPO, "tests", "stub-data"), "SCRAY_AUDIO_TEST_DB": DB})
     assert wait_up(f"{API}?action=ping") and wait_up(f"http://127.0.0.1:{BOX_PORT}/x"), "servers did not start"
+
+    print("base64 bodies (so a firewall has nothing to match on)")
+    st, j = call("audio_worker_start", cookie=False, worker="test-worker-key", body={}, b64=True)
+    assert st == 200 and j.get("scan_id"), (st, j)
+    st, j = call("audio_worker_seen", cookie=False, worker="test-worker-key", b64=True,
+                 body={"scan_id": j["scan_id"], "files": [{"path": "A/x../select * from x/<b>.mp3", "size": 1, "etag": "e", "mtime": 1, "cover": ""}]})
+    assert st == 200 and j.get("seen") == 1, (st, j)
+    st, j = call("audio_worker_seen", cookie=False, worker="test-worker-key", body={"scan_id": 1, "files": []}, b64=False)
+    assert st == 200, "plain JSON bodies must still work"
 
     print("auth")
     check("ping needs nothing", call("ping", cookie=False)[0] == 200)
