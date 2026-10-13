@@ -113,8 +113,8 @@ def http(url, method="GET", headers=None, data=None, timeout=90, tries=4):
 def api(action, payload=None):
     status, body = http(
         f"{API}?action={action}", "POST",
-        {"X-Scray-Worker": WORKER_KEY, "Content-Type": "application/json"},
-        json.dumps(payload or {}).encode(),
+        {"X-Scray-Worker": WORKER_KEY, "X-Scray-Enc": "b64", "Content-Type": "text/plain"},
+        base64.b64encode(json.dumps(payload or {}).encode()),
     )
     try:
         j = json.loads(body)

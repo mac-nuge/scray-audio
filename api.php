@@ -290,7 +290,13 @@ function trackFilters(): array {
 
 $in = [];
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
-    $in = json_decode((string)file_get_contents('php://input'), true);
+    $raw = (string)file_get_contents('php://input');
+    // The scanner sends its payload base64-encoded: file names go through a web
+    // firewall that can 403 a body containing things like ../ or select ... from.
+    if (($_SERVER['HTTP_X_SCRAY_ENC'] ?? '') === 'b64') {
+        $raw = (string)base64_decode($raw, true);
+    }
+    $in = json_decode($raw, true);
     if (!is_array($in)) fail(400, 'body is not JSON');
 }
 
