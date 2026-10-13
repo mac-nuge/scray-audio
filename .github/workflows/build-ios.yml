@@ -23,15 +23,17 @@ jobs:
     defaults:
       run:
         working-directory: app
+        shell: bash        # with pipefail, so `| tee` doesn't hide a failure
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm install --no-audit --no-fund
+      - name: npm install
+        run: npm install --no-audit --no-fund 2>&1 | tee -a "$RUNNER_TEMP/all.log"
       - name: Make the web layer (the page the app bundles)
         # AUDIO_URL (an Actions variable, optional) is the library's address the sign-in sheet starts with.
-        run: node scripts/make-web.js
+        run: node scripts/make-web.js 2>&1 | tee -a "$RUNNER_TEMP/all.log"
         env:
           AUDIO_SERVER: ${{ vars.AUDIO_URL }}
       - name: Compute artifact name
@@ -41,7 +43,7 @@ jobs:
           echo "### BBW Sounds b${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
           echo "web layer: $(cat ../VERSION | tr -d '\r\n')" >> $GITHUB_STEP_SUMMARY
       - name: Prebuild iOS project
-        run: npx expo prebuild --platform ios
+        run: npx expo prebuild --platform ios 2>&1 | tee -a "$RUNNER_TEMP/all.log"
         env:
           IPA_BUILD_NUMBER: ${{ github.run_number }}
       - name: Discover scheme name
@@ -60,7 +62,7 @@ jobs:
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            AD_HOC_CODE_SIGNING_ALLOWED=YES
+            AD_HOC_CODE_SIGNING_ALLOWED=YES 2>&1 | tee -a "$RUNNER_TEMP/all.log"
       - name: Package as .ipa
         run: |
           APP_PATH=$(find ios/build -name "*.app" -maxdepth 6 | head -n 1)
@@ -123,6 +125,15 @@ jobs:
           # Swap the source in, then delete IPAs it no longer lists (keeps the last 3 per app).
           remote "cd '$SS_DIR' && mv -f source.json.part source.json && for f in *.ipa; do grep -qxF \"\$f\" .keep || rm -f -- \"\$f\"; done"
           echo "Published build $SS_BUILD ($SS_VERSION) to the SideStore source." >> $GITHUB_STEP_SUMMARY
+      - name: What went wrong (shown as an annotation on the run)
+        # The runner's logs can't be downloaded from some places, so on a failure the interesting lines are
+        # also written out as an annotation, which the checks API returns.
+        if: failure()
+        run: |
+          f="$RUNNER_TEMP/all.log"
+          [ -f "$f" ] || exit 0
+          msg=$( { grep -E "error:|ERR!|Error:|error -|fatal|FAILED|\*\* BUILD" "$f" | awk '!seen[$0]++' | head -40; echo "--- last lines ---"; tail -25 "$f"; } | cut -c1-400 | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+          echo "::error title=build log::$msg"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.ipa.outputs.name }}
