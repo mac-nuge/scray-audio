@@ -1,0 +1,156 @@
+permissions:
+  contents: read
+
+# BBW Sounds: an unsigned IPA (for SideStore), built the way scray-native's are - expo prebuild + xcodebuild on a
+# macOS runner. Run it by hand (Actions > Build unsigned iOS IPA > Run workflow), or it runs as a compile check
+# when a pull request changes the app or the page the app bundles.
+name: Build unsigned iOS IPA
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'app/**'
+      - 'audio.js'
+      - 'audio.css'
+      - 'offline.js'
+      - 'app.js'
+      - 'index.php'
+      - '.github/workflows/build-ios.yml'
+
+jobs:
+  build:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: app
+        shell: bash        # with pipefail, so `| tee` doesn't hide a failure
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: npm install
+        run: npm install --no-audit --no-fund 2>&1 | tee -a "$RUNNER_TEMP/all.log"
+      - name: Make the web layer (the page the app bundles)
+        # AUDIO_URL (an Actions variable, optional) is the library's address the sign-in sheet starts with.
+        run: node scripts/make-web.js 2>&1 | tee -a "$RUNNER_TEMP/all.log"
+        env:
+          AUDIO_SERVER: ${{ vars.AUDIO_URL }}
+      - name: Compute artifact name
+        id: ipa
+        run: |
+          echo "name=bbw-sounds-b${{ github.run_number }}" >> $GITHUB_OUTPUT
+          echo "### BBW Sounds b${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "web layer: $(cat ../VERSION | tr -d '\r\n')" >> $GITHUB_STEP_SUMMARY
+      - name: Prebuild iOS project
+        run: npx expo prebuild --platform ios 2>&1 | tee -a "$RUNNER_TEMP/all.log"
+        env:
+          IPA_BUILD_NUMBER: ${{ github.run_number }}
+      - name: Discover scheme name
+        id: scheme
+        run: |
+          cd ios
+          WORKSPACE=$(ls -d *.xcworkspace)
+          SCHEME="${WORKSPACE%.xcworkspace}"
+          echo "Detected scheme: $SCHEME"
+          echo "name=$SCHEME" >> $GITHUB_OUTPUT
+      - name: Build unsigned .app (Release)
+        run: |
+          cd ios
+          xcodebuild -workspace *.xcworkspace -scheme "${{ steps.scheme.outputs.name }}" \
+            -configuration Release -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES 2>&1 | tee -a "$RUNNER_TEMP/all.log"
+      - name: Package as .ipa
+        run: |
+          APP_PATH=$(find ios/build -name "*.app" -maxdepth 6 | head -n 1)
+          echo "Found app at: $APP_PATH"
+          mkdir -p Payload
+          cp -r "$APP_PATH" Payload/
+          zip -r "${{ steps.ipa.outputs.name }}.ipa" Payload
+      - name: Check what is in the IPA
+        # Fails the build if the page, its config or the app's identity didn't make it in; the result is also
+        # written as a notice on the run.
+        run: |
+          APP=$(find ios/build -name "*.app" -maxdepth 6 | head -n 1)
+          for f in index.html audio.js audio.css offline.js app.js config.js; do
+            [ -f "$APP/web/$f" ] || { echo "::error::web/$f is not in the app bundle"; exit 1; }
+          done
+          PB=/usr/libexec/PlistBuddy
+          NAME=$($PB -c "Print :CFBundleDisplayName" "$APP/Info.plist")
+          ID=$($PB -c "Print :CFBundleIdentifier" "$APP/Info.plist")
+          BG=$($PB -c "Print :UIBackgroundModes" "$APP/Info.plist" | tr -d '\n ')
+          ICON=$(ls "$APP" | grep -ci "^AppIcon" || true)
+          [ "$NAME" = "BBW Sounds" ] || { echo "::error::display name is '$NAME'"; exit 1; }
+          echo "$BG" | grep -q audio || { echo "::error::UIBackgroundModes has no audio: $BG"; exit 1; }
+          echo "::notice title=IPA contents::$NAME | $ID | background: $BG | icon files: $ICON | web: $(ls "$APP/web" | tr '\n' ' ') | $(du -sh "$APP" | cut -f1)"
+      - name: Publish to the SideStore source
+        # Only for a run started by hand. The IPA, its icon and the updated source.json go to a folder on
+        # macnguyen.com behind an unguessable path (the same SIDESTORE_* secrets scray-native uses - copy them
+        # into this repo's secrets). SideStore, given SIDESTORE_URL/source.json once, offers every build as an
+        # update. Skipped, with a warning, until the secrets are set; the IPA is still attached to the run.
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          SS_SSH_KEY: ${{ secrets.SIDESTORE_SSH_KEY }}
+          SS_HOST: ${{ secrets.SIDESTORE_HOST }}
+          SS_PORT: ${{ secrets.SIDESTORE_PORT }}
+          SS_USER: ${{ secrets.SIDESTORE_USER }}
+          SS_DIR: ${{ secrets.SIDESTORE_DIR }}
+          SS_BASE_URL: ${{ secrets.SIDESTORE_URL }}
+          SS_BUNDLE_ID: com.mac.scrayaudio
+          SS_APP_NAME: BBW Sounds
+          SS_ICON_SRC: assets/icon.png
+          SS_ICON_NAME: icon-bbw-sounds.png
+          SS_IPA_NAME: ${{ steps.ipa.outputs.name }}.ipa
+          SS_BUILD: ${{ github.run_number }}
+          SS_VERSION: 1.0.${{ github.run_number }}
+        run: |
+          if [ -z "$SS_SSH_KEY" ] || [ -z "$SS_HOST" ] || [ -z "$SS_USER" ] || [ -z "$SS_DIR" ] || [ -z "$SS_BASE_URL" ]; then
+            echo "::warning::SideStore secrets aren't all set - not published (the IPA is still attached to this run)"
+            exit 0
+          fi
+          SS_PORT="${SS_PORT:-22}"
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SS_SSH_KEY" > ~/.ssh/sidestore && chmod 600 ~/.ssh/sidestore
+          ssh-keyscan -p "$SS_PORT" "$SS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          OPTS="-i $HOME/.ssh/sidestore -o IdentitiesOnly=yes -o BatchMode=yes"
+          remote() { ssh $OPTS -p "$SS_PORT" "$SS_USER@$SS_HOST" "$1"; }
+          put() { scp $OPTS -P "$SS_PORT" "$1" "$SS_USER@$SS_HOST:$SS_DIR/$2"; }
+
+          # No folder listing; source.json never cached, so a new build shows at once.
+          printf '%s\n' 'Options -Indexes' \
+            '<FilesMatch "\.json$">' '  Header set Cache-Control "no-cache, must-revalidate"' '</FilesMatch>' \
+            '<FilesMatch "\.ipa$">' '  ForceType application/octet-stream' '</FilesMatch>' > ss.htaccess
+
+          remote "mkdir -p '$SS_DIR'"
+          put ss.htaccess .htaccess
+          put "$SS_ICON_SRC" "$SS_ICON_NAME"
+          # Uploaded under a temporary name, so a half-sent IPA is never listed.
+          put "$SS_IPA_NAME" "$SS_IPA_NAME.part"
+          remote "mv -f '$SS_DIR/$SS_IPA_NAME.part' '$SS_DIR/$SS_IPA_NAME'"
+
+          remote "cat '$SS_DIR/source.json' 2>/dev/null || true" > ss-current.json
+          export SS_IPA_SIZE="$(stat -f%z "$SS_IPA_NAME")"
+          export SS_NOTES="$(tr -d '\r\n' < ../VERSION 2>/dev/null) - IPA build $SS_BUILD"
+          node scripts/sidestore-publish.js ss-current.json ss-source.json ss-keep.txt
+
+          put ss-source.json source.json.part
+          put ss-keep.txt .keep
+          # Swap the source in, then delete IPAs it no longer lists (keeps the last 3 per app).
+          remote "cd '$SS_DIR' && mv -f source.json.part source.json && for f in *.ipa; do grep -qxF \"\$f\" .keep || rm -f -- \"\$f\"; done"
+          echo "Published build $SS_BUILD ($SS_VERSION) to the SideStore source." >> $GITHUB_STEP_SUMMARY
+      - name: What went wrong (shown as an annotation on the run)
+        # The runner's logs can't be downloaded from some places, so on a failure the interesting lines are
+        # also written out as an annotation, which the checks API returns.
+        if: failure()
+        run: |
+          f="$RUNNER_TEMP/all.log"
+          [ -f "$f" ] || exit 0
+          msg=$( { grep -E "error:|ERR!|Error:|error -|fatal|FAILED|\*\* BUILD" "$f" | awk '!seen[$0]++' | head -40; echo "--- last lines ---"; tail -25 "$f"; } | cut -c1-400 | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+          echo "::error title=build log::$msg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.ipa.outputs.name }}
+          path: app/${{ steps.ipa.outputs.name }}.ipa

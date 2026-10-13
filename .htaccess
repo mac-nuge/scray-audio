@@ -1,7 +1,7 @@
 # Keep the non-page parts of the repo off the web. Hostinger's git deploy copies
 # the whole repo into the site folder, including these.
 RewriteEngine On
-RewriteRule ^(gateway|tests|\.github)(/|$) - [F,L]
+RewriteRule ^(gateway|tests|app|\.github)(/|$) - [F,L]
 RewriteRule \.(md|py|service|timer|example|sh)$ - [F,L]
 <FilesMatch "^(audio-config\.php)$">
   Require all denied
