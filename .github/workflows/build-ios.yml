@@ -70,6 +70,22 @@ jobs:
           mkdir -p Payload
           cp -r "$APP_PATH" Payload/
           zip -r "${{ steps.ipa.outputs.name }}.ipa" Payload
+      - name: Check what is in the IPA
+        # Fails the build if the page, its config or the app's identity didn't make it in; the result is also
+        # written as a notice on the run.
+        run: |
+          APP=$(find ios/build -name "*.app" -maxdepth 6 | head -n 1)
+          for f in index.html audio.js audio.css offline.js app.js config.js; do
+            [ -f "$APP/web/$f" ] || { echo "::error::web/$f is not in the app bundle"; exit 1; }
+          done
+          PB=/usr/libexec/PlistBuddy
+          NAME=$($PB -c "Print :CFBundleDisplayName" "$APP/Info.plist")
+          ID=$($PB -c "Print :CFBundleIdentifier" "$APP/Info.plist")
+          BG=$($PB -c "Print :UIBackgroundModes" "$APP/Info.plist" | tr -d '\n ')
+          ICON=$(ls "$APP" | grep -ci "^AppIcon" || true)
+          [ "$NAME" = "BBW Sounds" ] || { echo "::error::display name is '$NAME'"; exit 1; }
+          echo "$BG" | grep -q audio || { echo "::error::UIBackgroundModes has no audio: $BG"; exit 1; }
+          echo "::notice title=IPA contents::$NAME | $ID | background: $BG | icon files: $ICON | web: $(ls "$APP/web" | tr '\n' ' ') | $(du -sh "$APP" | cut -f1)"
       - name: Publish to the SideStore source
         # Only for a run started by hand. The IPA, its icon and the updated source.json go to a folder on
         # macnguyen.com behind an unguessable path (the same SIDESTORE_* secrets scray-native uses - copy them

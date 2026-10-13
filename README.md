@@ -32,6 +32,8 @@ track (valid an hour; the player asks for a fresh one if it expires mid-pause).
 | File | |
 |---|---|
 | `index.php`, `audio.js`, `audio.css` | the page (no libraries) |
+| `app/` | the iOS app, **BBW Sounds**: an Expo + Swift wrapper around this page (see *The iOS app* below) |
+| `.github/workflows/build-ios.yml` | builds the unsigned IPA on a macOS runner |
 | `offline.js`, `app.js` | saving tracks on the phone and the Offline filter; the iOS app's sign-in and setup. Both do nothing in a browser tab |
 | `api.php` | the API: browse, search, signed links, and the scanner's `audio_worker_*` actions |
 | `audio-config.php` | where secrets and the database live (no secrets in it) |
@@ -104,6 +106,30 @@ sends CORS headers, because the app's page is not on the site's origin.
 
 Supported: mp3, flac, m4a, aac, ogg, opus, wav - whatever the browser can decode. Safari doesn't play
 ogg/opus.
+
+## The iOS app (BBW Sounds)
+
+`app/` is an Expo project with one Swift module (`app/modules/scray-audio/ios/`), built the way Scray Native is: `expo prebuild`
+then `xcodebuild` on a macOS runner, unsigned, for SideStore. The app is the page in a web view, with the few things a page can't do:
+
+| Swift file | |
+|---|---|
+| `ScrayAudioView.swift` | the web view; the bridge (`state`, `pickFolder`, `download`, `remove`, ...); sets the audio session for background playback |
+| `ScrayAudioStore.swift` | the folder you pick (a security-scoped bookmark, kept) and `<folder>/Offline/…` |
+| `ScrayAudioDownloads.swift` | saves a signed link into `Offline/<library path>`; progress back to the page; keeps the screen on while saving |
+| `ScrayAudioSchemeHandler.swift` | serves `scray-audio://local/<path>` (a saved track or cover) with Range support, so the player can seek |
+
+`app/scripts/make-web.js` makes the bundled page from `index.php` (the PHP login check and cache numbers dropped), `audio.js`,
+`audio.css`, `offline.js`, `app.js`, plus a `config.js` with the library's address. **The page is bundled into the IPA**, so a change
+to `audio.js` etc. reaches the phone with the next IPA, not with a deploy.
+
+**Building.** Actions > *Build unsigned iOS IPA* > Run workflow (it also runs as a compile check on pull requests that touch the app or the
+page). The IPA is attached to the run, and published to the SideStore source when the same `SIDESTORE_*` secrets scray-native uses are
+set in this repo. Set an Actions *variable* `AUDIO_URL` (for example `https://macnguyen.com/audio`) to change the library address the
+sign-in sheet starts with; it can also be typed in there. Bundle id `com.mac.scrayaudio`; the build number is the run number.
+
+**First run.** Open the app, sign in (library address, password, authenticator code), then ⤓ Save offline on anything.
+The first save asks for a folder; pick one in Files (On My iPhone is fine). Saved music is then under `<that folder>/Offline/`.
 
 ## Developing
 
