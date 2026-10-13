@@ -7,6 +7,17 @@ named `test:` until it has been tried and then `stable:`. Record the reasoning, 
 
 ## Entries
 
+### audio 1.2 — test: scan button
+<!-- 2026-10-13T20:26Z -->
+- **Asked:** a button in the page that starts a scan, and live scan progress in the app, so the scanner doesn't have to be run by hand.
+- **Why it goes through a request, not a direct start:** the scanner lives on the gateway and Hostinger can't reach in and run it. So the button only writes a request into the database (`meta.scan_requested_at`). A second small unit on the gateway, `scray-audio-scan-poll` (every 30 s), asks `api.php` whether there is one and, if so, runs `systemctl start --no-block scray-audio-scan.service`. Starting the real service rather than scanning inside the poller means systemd itself prevents two scans at once, and the nightly timer and the button can't collide. The cost is up to 30 s before it starts; the panel says so while it waits. The poller runs as root because starting a service needs it; all it reads from `api.php` is one yes/no.
+- **One click, one scan:** `audio_worker_poll` takes the request (clears it and records a claim), so a request is used once. Pressing the button while a scan runs, or in the short window between the gateway taking a request and the scan starting, does nothing.
+- **Progress:** the scanner reports folders, files seen, tags read and errors to `audio_worker_progress` at most every 2 s (and after each batch); a failed report never stops the scan. The page reads `scan_status` every 2 s while the panel is open or a scan is active, once a minute otherwise (so the nightly scan still shows), and not at all in a hidden tab. The bar is a real percentage against the size of the last complete scan, and a sliding bar when there isn't one yet.
+- **It can say when something is wrong, instead of spinning:** a scan with no update for 5 minutes is shown as stopped (the scanner crashed or the gateway went away); a request nobody has picked up, with no check-in from the poller for 2 minutes, shows the command to turn the timer on; a scan that ends on an error records why (`stopped: ...`).
+- **Database:** schema version 2 adds progress columns to `scans` and a `meta` table. It upgrades an existing database in place on the first request.
+- **Checked:** `tests/smoke.py` (now about 70 checks) covers the request / take / start / progress / finish cycle, one-click-one-scan, scan during scan, a stale scan, a failed scan, `--poll` with and without a request, and a failing start command. Headless Chromium at desktop and phone width: open the panel, press the button, waiting / starting / running (live counts, percentage, spinning header button) / finished (toast, refresh button), Escape, no sideways scroll, no page errors. **Not tried:** the real systemd units and a real Hostinger deploy.
+- Deploy: redeploy `staging` on Hostinger (the database upgrades itself); on the gateway copy the new `scray-audio-scan.py` to `/opt/scray/` and the two new `scray-audio-scan-poll.*` files to `/etc/systemd/system/`, then `systemctl daemon-reload && systemctl enable --now scray-audio-scan-poll.timer`.
+
 ### audio 1.1 — test: scanner base64 bodies
 <!-- 2026-10-13T20:18Z -->
 - **Asked:** the first full scan stopped at about 1,400 files with a plain-text `403 Forbidden` from `audio_worker_seen`.

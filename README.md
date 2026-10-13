@@ -35,6 +35,7 @@ track (valid an hour; the player asks for a fresh one if it expires mid-pause).
 | `api.php` | the API: browse, search, signed links, and the scanner's `audio_worker_*` actions |
 | `audio-config.php` | where secrets and the database live (no secrets in it) |
 | `gateway/scray-audio-scan.py` | the scanner; `.service` + `.timer` run it nightly; `audio-scan.env.example` |
+| `gateway/scray-audio-scan-poll.*` | a service + timer that checks every 30 s whether the page's **Scan now** button was pressed |
 | `tests/smoke.py` | end-to-end test with a fake box; run by CI |
 | `VERSION`, `scray-changelog.md` | version name and the reasoning log, as in the other Scray repos |
 
@@ -56,7 +57,7 @@ the same as video's.
 (for example `audio-staging/`). The database, `scray-data/audio.sqlite`, is created on first request.
 
 **4. Scanner.** On the gateway: `apt install python3-mutagen`; put `scray-audio-scan.py` in `/opt/scray/`,
-the `.service` and `.timer` in `/etc/systemd/system/`, and a filled-in copy of `audio-scan.env.example` at
+the four `scray-audio-scan*.service` / `.timer` files in `/etc/systemd/system/`, and a filled-in copy of `audio-scan.env.example` at
 `/etc/scray/audio-scan.env` (mode 600). The scanning sub-account must have read-only **off**
 (a read-only account can't list folders). Then:
 
@@ -64,7 +65,12 @@ the `.service` and `.timer` in `/etc/systemd/system/`, and a filled-in copy of `
 systemctl daemon-reload
 systemctl start scray-audio-scan && journalctl -u scray-audio-scan -f   # the first scan
 systemctl enable --now scray-audio-scan.timer                            # nightly after that
+systemctl enable --now scray-audio-scan-poll.timer                       # lets the page's Scan button start one
 ```
+
+Once the poll timer is on you don't need the command line: the **⟳** button in the page's header opens the
+scan panel, **Scan library now** leaves a request, the gateway picks it up within 30 seconds, and the panel
+shows folders, files and tags as they're read. The scanner reports progress to `api.php` about every 2 s.
 
 Try `SCRAY_SCAN_MAX=200` first. A scan limited by `SCRAY_SCAN_ROOT` or `SCRAY_SCAN_MAX` never marks
 anything as gone, and neither does one that saw nothing or would remove more than half the library.

@@ -10,7 +10,7 @@ tests/stub-data), runs the real scanner against them, then checks what the api
 says - including that a signed URL plays, seeks, and a forged one is refused.
 Needs: php, python3-mutagen, ffmpeg.
 """
-import base64, hashlib, json, os, shutil, signal, subprocess, sys, tempfile, time, urllib.error, urllib.parse, urllib.request
+import base64, hashlib, json, os, shutil, signal, sqlite3, subprocess, sys, tempfile, time, urllib.error, urllib.parse, urllib.request
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORK = os.path.join(REPO, "tests", ".work")
@@ -94,10 +94,13 @@ def call(action, params=None, cookie=True, key=None, body=None, worker=None, b64
         return e.code, json.loads(e.read() or b"{}")
 
 
-def scan(extra_env=None):
+SCANNER = os.path.join(REPO, "gateway", "scray-audio-scan.py")
+
+
+def scan(extra_env=None, args=()):
     env = {**os.environ, "SCRAY_AUDIO_API": API, "SCRAY_AUDIO_WORKER_KEY": "test-worker-key",
            "SCRAY_DAV_URL": f"http://127.0.0.1:{BOX_PORT}", "SCRAY_DAV_USER": "scan", "SCRAY_DAV_PASS": "pw", **(extra_env or {})}
-    r = subprocess.run([sys.executable, os.path.join(REPO, "gateway", "scray-audio-scan.py")], env=env, capture_output=True, text=True)
+    r = subprocess.run([sys.executable, SCANNER, *args], env=env, capture_output=True, text=True)
     return r.returncode, r.stdout + r.stderr
 
 
@@ -229,6 +232,68 @@ def main():
     code, out = scan()
     r = call("tracks", {"folder": "Music/Artist One"})[1]["tracks"]
     check("a changed file gets new tags", [x["title"] for x in r] == ["Renamed"], str(r))
+
+    print("scan button and live progress")
+    W = dict(cookie=False, worker="test-worker-key")
+    scan()   # a full scan, so we start from a known library
+    st = call("scan_status")[1]
+    last = st["scan"]
+    N = last["files_seen"]
+    check("progress is recorded by a normal scan", N >= 1 and last["finished_at"] and last["folders"] > 0 and last["tagged"] is not None and last["phase"] == "done", str(last))
+    check("idle, with an expected size from the last complete scan", st["state"] == "idle" and st["expected"] == N and st["tracks"] == N, str(st))
+    check("no scanner has checked in yet", st["worker_online"] is False and st["worker_age"] is None, str(st))
+    check("scan_request is POST only", call("scan_request")[0] == 405)
+    check("the scanner key can't press the button", call("scan_request", body={}, **W)[0] == 401)
+    check("no session, no button", call("scan_request", cookie=False, body={})[0] == 401)
+
+    check("pressing the button leaves a request", call("scan_request", body={})[1]["state"] == "requested")
+    check("pressing it twice is still one request", call("scan_request", body={})[1]["state"] == "requested")
+    j = call("audio_worker_poll", body={}, **W)[1]
+    check("the gateway takes the request", j["requested"] is True)
+    st = call("scan_status")[1]
+    check("...which shows as starting, with the scanner online", st["state"] == "starting" and st["worker_online"] is True, str(st))
+    check("the request is taken once", call("audio_worker_poll", body={}, **W)[1]["requested"] is False)
+
+    sid = call("audio_worker_start", body={}, **W)[1]["scan_id"]
+    st = call("scan_status")[1]
+    check("a started scan is running", st["state"] == "running" and st["scan"]["id"] == sid, str(st))
+    call("audio_worker_progress", body={"scan_id": sid, "phase": "scanning", "folders": 3, "files": 40, "tagged": 10, "errors": 1}, **W)
+    sc = call("scan_status")[1]["scan"]
+    check("progress shows live", (sc["folders"], sc["files_seen"], sc["tagged"], sc["errors"], sc["phase"]) == (3, 40, 10, 1, "scanning"), str(sc))
+    check("pressing the button during a scan starts nothing", call("scan_request", body={})[1]["state"] == "running")
+
+    DBH = sqlite3.connect(DB)
+    DBH.execute("UPDATE scans SET heartbeat = '2000-01-01T00:00:00+00:00' WHERE id = ?", (sid,))
+    DBH.commit()
+    st = call("scan_status")[1]
+    check("a scan that stopped reporting is flagged, not 'running' forever", st["state"] == "idle" and st["scan"]["stale"] is True, str(st))
+    check("a stale scan can be replaced by a new request", call("scan_request", body={})[1]["state"] == "requested")
+    call("audio_worker_poll", body={}, **W)
+
+    call("audio_worker_finish", body={"scan_id": sid, "files_seen": 40, "complete": False, "error": "RuntimeError: boom"}, **W)
+    st = call("scan_status")[1]
+    check("a failed scan says why", st["scan"]["phase"] == "failed" and st["scan"]["note"] == "stopped: RuntimeError: boom" and st["scan"]["stale"] is False, str(st["scan"]))
+    call("audio_worker_progress", body={"scan_id": sid, "files": 999}, **W)
+    check("progress after the end changes nothing", call("scan_status")[1]["scan"]["files_seen"] == 40)
+    DBH.close()
+    scan()   # a new scan starting also clears the "starting" claim left above
+    check("a scan starting clears the claim", call("scan_status")[1]["state"] == "idle")
+
+    START = {"SCRAY_SCAN_START_CMD": f"{sys.executable} {SCANNER}"}
+    code, out = scan(START, ["--poll"])
+    check("--poll with no request does nothing, quietly", code == 0 and out.strip() == "", out)
+    check("...but it counts as the scanner being online", call("scan_status")[1]["worker_online"] is True)
+    before = call("scan_status")[1]["scan"]["id"]
+    call("scan_request", body={})
+    code, out = scan(START, ["--poll"])
+    check("--poll starts a scan when the page asked for one", code == 0 and "asked for from the page" in out and f"done: {N} files" in out, out)
+    st = call("scan_status")[1]
+    check("...and the request is used up", st["state"] == "idle" and st["scan"]["id"] > before and st["scan"]["files_seen"] == N and st["scan"]["phase"] == "done", str(st))
+    code, out = scan({"SCRAY_SCAN_START_CMD": "false"}, ["--poll"])
+    check("--poll with nothing asked never runs the start command", code == 0, out)
+    call("scan_request", body={})
+    code, out = scan({"SCRAY_SCAN_START_CMD": "false"}, ["--poll"])
+    check("a start command that fails makes --poll fail loudly", code != 0, out)
 
 
 if __name__ == "__main__":

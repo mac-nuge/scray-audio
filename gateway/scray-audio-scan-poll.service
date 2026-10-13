@@ -1,0 +1,15 @@
+# /etc/systemd/system/scray-audio-scan-poll.service
+# Asks api.php whether the page's "Scan now" button was pressed and, if so,
+# starts scray-audio-scan.service. Runs as root because starting a service
+# needs it; it only reads one yes/no from api.php. Started every 30 s by
+# scray-audio-scan-poll.timer, and quiet unless there is something to do.
+[Unit]
+Description=Scray audio: check whether a scan was asked for
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/scray/audio-scan.env
+ExecStart=/usr/bin/python3 -u /opt/scray/scray-audio-scan.py --poll
+Nice=10

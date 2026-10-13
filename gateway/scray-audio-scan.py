@@ -28,6 +28,19 @@ Settings come from the environment (EnvironmentFile=/etc/scray/audio-scan.env):
   SCRAY_SCAN_ROOT         only walk this folder, e.g. Music/part f (default: all).
                           A partial walk never marks anything as gone.
   SCRAY_SCAN_MAX          stop after this many files (testing). Also partial.
+  SCRAY_SCAN_START_CMD    what --poll runs when the page asked for a scan
+                          (default: systemctl start --no-block scray-audio-scan.service)
+
+Two ways to run it:
+
+  scray-audio-scan.py          one scan, now (the nightly timer, or by hand)
+  scray-audio-scan.py --poll   ask api.php whether the page's "Scan now" button
+                               was pressed; if so, start a scan. Run every 30 s
+                               by scray-audio-scan-poll.timer. Prints nothing
+                               when there is nothing to do.
+
+While a scan runs it reports progress to api.php (folders, files, tags read),
+which the page shows live.
 
 Needs python3-mutagen (apt install python3-mutagen).
 """
@@ -36,6 +49,8 @@ import io
 import json
 import os
 import re
+import shlex
+import subprocess
 import sys
 import time
 import urllib.error
@@ -81,6 +96,7 @@ DAV_PASS = env("SCRAY_DAV_PASS", required=True)
 TAG_WORKERS = int(env("SCRAY_TAG_WORKERS", "4"))
 ROOT = env("SCRAY_SCAN_ROOT", "").strip("/")
 MAX_FILES = int(env("SCRAY_SCAN_MAX", "0") or 0)
+START_CMD = env("SCRAY_SCAN_START_CMD", "systemctl start --no-block scray-audio-scan.service")
 DAV_AUTH = "Basic " + base64.b64encode(f"{DAV_USER}:{DAV_PASS}".encode()).decode()
 
 
@@ -333,6 +349,23 @@ class Scan:
         self.folders = 0
         self.complete = True
         self.pool = ThreadPoolExecutor(max_workers=TAG_WORKERS)
+        self._last_progress = 0.0
+        self._progress_warned = False
+
+    def progress(self, phase="scanning", force=False):
+        """Tell api.php how far along we are (the page shows it). At most every
+        2 s, and never allowed to stop the scan."""
+        now = time.time()
+        if not force and now - self._last_progress < 2:
+            return
+        self._last_progress = now
+        try:
+            api("audio_worker_progress", {"scan_id": self.id, "phase": phase, "folders": self.folders,
+                                          "files": self.seen + len(self.pending), "tagged": self.tagged, "errors": self.errors})
+        except Exception as e:  # noqa: BLE001
+            if not self._progress_warned:
+                log("progress report failed (carrying on):", e)
+                self._progress_warned = True
 
     def flush(self):
         if not self.pending:
@@ -348,6 +381,7 @@ class Scan:
             api("audio_worker_tags", {"tracks": results})
             self.tagged += len(results)
         log(f"folders {self.folders}  files {self.seen}  tagged {self.tagged}  tag errors {self.errors}")
+        self.progress(force=True)
 
     def walk(self):
         stack = [ROOT]
@@ -360,6 +394,7 @@ class Scan:
                 self.complete = False
                 continue
             self.folders += 1
+            self.progress()
             names = [e[0] for e in entries if not e[1]]
             cover = pick_cover(names)
             for name, is_dir, size, etag, mtime in sorted(entries, key=lambda e: e[0].lower()):
@@ -381,20 +416,35 @@ class Scan:
                 self.flush()
         self.flush()
 
-    def finish(self):
+    def finish(self, error=None):
         partial = bool(ROOT) or bool(MAX_FILES)
         res = api("audio_worker_finish", {"scan_id": self.id, "files_seen": self.seen,
-                                          "complete": self.complete and not partial})
+                                          "complete": self.complete and not partial and not error,
+                                          "error": error or ""})
         return res
 
 
+def poll():
+    """Has the page asked for a scan? If so, start the scan service."""
+    if api("audio_worker_poll").get("requested"):
+        log("scan asked for from the page - starting it")
+        subprocess.run(shlex.split(START_CMD), check=True)
+    return 0
+
+
 def main():
+    if "--poll" in sys.argv[1:]:
+        return poll()
     log(f"scan starting: {DAV_USER} {'/' + ROOT if ROOT else '(whole box)'}")
     scan = Scan()
+    err = None
     try:
         scan.walk()
+    except BaseException as e:  # noqa: BLE001  (the page shows why it stopped)
+        err = f"{type(e).__name__}: {e}"
+        raise
     finally:
-        res = scan.finish()
+        res = scan.finish(err)
     log(f"done: {scan.seen} files, {scan.tagged} tagged, {scan.errors} tag errors, {res['pruned']} marked gone"
         + (f" ({res['skipped_prune']})" if res.get("skipped_prune") else "")
         + ("" if scan.complete else "  [INCOMPLETE: some folders could not be listed]"))

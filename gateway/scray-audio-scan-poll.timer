@@ -1,0 +1,13 @@
+# /etc/systemd/system/scray-audio-scan-poll.timer
+# Every 30 s (counted from the end of the last check). The page shows
+# "the scanner hasn't checked in" if this stops.
+[Unit]
+Description=Scray audio: check for a scan request every 30 s
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=30s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

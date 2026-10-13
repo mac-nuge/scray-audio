@@ -31,8 +31,18 @@ $v = static fn(string $f): string => (string)@filemtime(__DIR__ . '/' . $f);
     <a href="#/genres" data-tab="genres">Genres</a>
   </nav>
   <form id="searchform" role="search"><input id="search" type="search" placeholder="Search" autocomplete="off" enterkeyhint="search"></form>
+  <button id="scanbtn" type="button" title="Library scan" aria-haspopup="dialog" aria-expanded="false"><span class="ic" aria-hidden="true">⟳</span><span id="scanlabel"></span></button>
   <button id="shuffleall" type="button" title="Shuffle the whole library">🔀 Shuffle all</button>
 </header>
+
+<section id="scanpanel" hidden role="dialog" aria-label="Library scan">
+  <div class="shead"><b>Library scan</b><button id="scanclose" type="button" aria-label="Close">×</button></div>
+  <div id="scanmsg" class="smsg"></div>
+  <div id="scanbar" class="sbar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><i></i></div>
+  <dl id="scannums" class="snums"></dl>
+  <div id="scanwarn" class="swarn" hidden></div>
+  <div class="sbtns"><button id="scango" type="button" class="primary">Scan library now</button><button id="scanrefresh" type="button" hidden>Refresh this page’s list</button></div>
+</section>
 
 <main id="view" tabindex="-1"></main>
 

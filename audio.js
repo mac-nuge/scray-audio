@@ -676,7 +676,135 @@
   $('search').addEventListener('input', e => { clearTimeout(searchTimer); searchTimer = setTimeout(() => go(e.target.value), 300); });
   $('searchform').addEventListener('submit', e => { e.preventDefault(); clearTimeout(searchTimer); go($('search').value); });
 
+
+  // ------------------------------------------------------------- scan panel
+  // The scanner runs on the gateway. The button leaves a request in api.php,
+  // the gateway picks it up within ~30 s, and while it works it reports
+  // progress that this panel reads every 2 s.
+  const scan = { state: 'idle', timer: 0, open: false, prev: null, viewStale: false };
+  const ACTIVE = new Set(['requested', 'starting', 'running']);
+
+  async function apiPost(action) {
+    let r, j;
+    try { r = await fetch(`${API}?action=${action}`, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: '{}' }); }
+    catch (e) { throw new Error('can’t reach the server'); }
+    try { j = await r.json(); } catch (e) { throw new Error(`server answered ${r.status}`); }
+    if (!r.ok || !j.ok) throw new Error(j.error || `server answered ${r.status}`);
+    return j;
+  }
+
+  const clock = secs => {
+    secs = Math.max(0, Math.round(secs || 0));
+    return secs >= 60 ? `${Math.floor(secs / 60)} min ${String(secs % 60).padStart(2, '0')} s` : `${secs} s`;
+  };
+  const when = iso => iso ? iso.slice(0, 16).replace('T', ' ') + ' UTC' : '';
+
+  function paintScan(st) {
+    const sc = st.scan, active = ACTIVE.has(st.state);
+    const files = sc ? (sc.files_seen || 0) : 0;
+    const btn = $('scanbtn'), bar = $('scanbar');
+    btn.classList.toggle('busy', active);
+    btn.classList.toggle('bad', st.state === 'idle' && !!(sc && sc.stale));
+    $('scanlabel').textContent = st.state === 'running' ? files.toLocaleString() : st.state === 'idle' ? '' : '…';
+    btn.title = st.state === 'running' ? `Scanning: ${files.toLocaleString()} files so far` : 'Library scan';
+
+    // message
+    let msg;
+    if (st.state === 'requested') msg = 'Scan asked for. Waiting for the scanner on the gateway to pick it up (it checks every 30 seconds)…';
+    else if (st.state === 'starting') msg = 'The scanner has the request and is starting…';
+    else if (st.state === 'running') {
+      const exp = st.expected || 0;
+      msg = `Scanning: ${files.toLocaleString()}${exp ? ` of about ${exp.toLocaleString()}` : ''} files · ${clock(sc.elapsed)}`;
+    } else if (sc && sc.stale) msg = `The last scan stopped reporting ${clock(sc.beat_age)} ago and never finished (the scanner may have crashed). On the gateway: journalctl -u scray-audio-scan -n 50`;
+    else if (sc && sc.finished_at) {
+      msg = `Last scan finished ${when(sc.finished_at)}: ${plural(sc.files_seen || 0, 'file')} seen, ${plural(sc.tagged || 0, 'tag read')}`
+        + (sc.pruned ? `, ${sc.pruned} removed` : '') + (sc.complete ? '' : ' (partial or incomplete: nothing removed)') + '.';
+    } else msg = 'No scan has run yet.';
+    if (st.state === 'idle' && sc && sc.note) msg += ` ${sc.note}.`;
+    $('scanmsg').textContent = msg;
+
+    // bar
+    const determinate = st.state === 'running' && st.expected > 0;
+    bar.classList.toggle('off', !active);
+    bar.classList.toggle('indet', active && !determinate);
+    const pct = determinate ? Math.min(99, Math.round(files / st.expected * 100)) : 0;
+    bar.firstElementChild.style.width = determinate ? pct + '%' : '';
+    if (determinate) bar.setAttribute('aria-valuenow', String(pct)); else bar.removeAttribute('aria-valuenow');
+
+    // numbers
+    const nums = $('scannums');
+    nums.replaceChildren();
+    const row = (k, v) => nums.append(h('div', {}, h('dt', { text: k }), h('dd', { text: v })));
+    if (sc && (st.state === 'running' || (st.state === 'idle' && sc.finished_at && !sc.stale))) {
+      row('Folders', (sc.folders || 0).toLocaleString());
+      row('Files seen', files.toLocaleString());
+      row('Tags read', (sc.tagged || 0).toLocaleString());
+      row('Tag errors', (sc.errors || 0).toLocaleString());
+    }
+    row('Tracks in library', (st.tracks || 0).toLocaleString());
+
+    // warning: nobody home
+    const warn = $('scanwarn');
+    const offline = (st.state === 'requested' || st.state === 'starting') && !st.worker_online;
+    warn.hidden = !offline;
+    if (offline) warn.textContent = st.worker_age == null
+      ? 'The scanner has never checked in. On the gateway: systemctl enable --now scray-audio-scan-poll.timer'
+      : `The scanner last checked in ${clock(st.worker_age)} ago. On the gateway: systemctl status scray-audio-scan-poll.timer`;
+
+    $('scango').disabled = active;
+    $('scango').textContent = active ? (st.state === 'running' ? 'Scanning…' : 'Requested…') : 'Scan library now';
+    $('scanrefresh').hidden = !scan.viewStale;
+
+    // finished while we were watching
+    if (scan.prev && ACTIVE.has(scan.prev) && st.state === 'idle' && sc) {
+      const bad = sc.stale || (sc.note || '').startsWith('stopped');
+      toast(bad ? 'The scan stopped early - open the scan panel' : `Scan finished: ${plural(st.tracks, 'track')} in the library`, bad);
+      scan.viewStale = true;
+      $('scanrefresh').hidden = false;
+    }
+    scan.prev = st.state;
+    scan.state = st.state;
+  }
+
+  // Every 2 s while the panel is open or a scan is active; once a minute otherwise
+  // (so a nightly scan still shows up), and not at all while the tab is hidden.
+  async function scanTick() {
+    clearTimeout(scan.timer);
+    let again = 60000;
+    if (!document.hidden || ACTIVE.has(scan.state) || scan.open) {
+      try {
+        paintScan(await api('scan_status'));
+        again = scan.open || ACTIVE.has(scan.state) ? 2000 : 60000;
+      } catch (e) {
+        if (scan.open) $('scanmsg').textContent = `Can’t read the scan status: ${e.message}`;
+        again = scan.open ? 5000 : 60000;
+      }
+    }
+    scan.timer = setTimeout(scanTick, again);
+  }
+
+  function setScanPanel(open) {
+    scan.open = open;
+    $('scanpanel').hidden = !open;
+    $('scanbtn').setAttribute('aria-expanded', String(open));
+    if (open) {
+      $('scanpanel').style.top = ($('top').getBoundingClientRect().bottom + 6) + 'px';
+      scanTick();
+    }
+  }
+  $('scanbtn').addEventListener('click', () => setScanPanel(!scan.open));
+  $('scanclose').addEventListener('click', () => { setScanPanel(false); $('scanbtn').focus(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && scan.open) setScanPanel(false); });
+  $('scango').addEventListener('click', async () => {
+    $('scango').disabled = true;
+    try { paintScan(await apiPost('scan_request')); scanTick(); }
+    catch (e) { toast(e.message, true); $('scango').disabled = false; }
+  });
+  $('scanrefresh').addEventListener('click', () => { scan.viewStale = false; $('scanrefresh').hidden = true; route(); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) scanTick(); });
+
   paintControls();
   paintPlay();
   route();
+  scanTick();
 })();
