@@ -143,6 +143,17 @@ CREATE TABLE IF NOT EXISTS scans (
 SQL);
         $db->exec('PRAGMA user_version = 1');
         $db->commit();
+        $ver = 1;
+    }
+    if ($ver < 2) {
+        // live scan progress + the page's "scan now" request
+        $db->beginTransaction();
+        foreach (['folders INTEGER', 'tagged INTEGER', 'errors INTEGER', 'phase TEXT', 'heartbeat TEXT', 'note TEXT'] as $col) {
+            $db->exec("ALTER TABLE scans ADD COLUMN $col");
+        }
+        $db->exec('CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)');
+        $db->exec('PRAGMA user_version = 2');
+        $db->commit();
     }
     return $db;
 }
@@ -300,6 +311,54 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
     if (!is_array($in)) fail(400, 'body is not JSON');
 }
 
+
+// ---- scan status -------------------------------------------------------
+// A scan is "running" while its heartbeat is fresh; one that stopped updating
+// without finishing is "stale" (the scanner crashed or the gateway went away).
+const SCAN_STALE_SECS  = 300;
+const WORKER_SEEN_SECS = 120;   // the gateway polls every 30 s
+const CLAIM_SECS       = 120;   // from "scanner took the request" to "scan started"
+
+function metaGet(PDO $db, string $k): ?string {
+    $v = run($db, 'SELECT v FROM meta WHERE k = :k', [':k' => $k])->fetchColumn();
+    return $v === false ? null : (string)$v;
+}
+function metaSet(PDO $db, string $k, ?string $v): void {
+    if ($v === null) { run($db, 'DELETE FROM meta WHERE k = :k', [':k' => $k]); return; }
+    run($db, 'INSERT INTO meta(k, v) VALUES (:k, :v) ON CONFLICT(k) DO UPDATE SET v = excluded.v', [':k' => $k, ':v' => $v]);
+}
+function secsSince(?string $iso): ?int {
+    $t = $iso ? strtotime($iso) : false;
+    return $t === false ? null : max(0, time() - $t);
+}
+
+function scanStatus(PDO $db): array {
+    $scan = run($db, 'SELECT id, started_at, finished_at, files_seen, folders, tagged, errors, phase, heartbeat, note, complete, pruned
+                        FROM scans ORDER BY id DESC LIMIT 1')->fetch() ?: null;
+    $beat = $scan ? secsSince($scan['heartbeat'] ?: $scan['started_at']) : null;
+    $open = $scan && !$scan['finished_at'];
+    $running = $open && $beat !== null && $beat < SCAN_STALE_SECS;
+    $stale   = $open && !$running;
+    $claimed = secsSince(metaGet($db, 'scan_claimed_at'));
+    $state = 'idle';
+    if ($running) $state = 'running';
+    elseif ($claimed !== null && $claimed < CLAIM_SECS) $state = 'starting';
+    elseif (metaGet($db, 'scan_requested_at') !== null) $state = 'requested';
+    $seen = secsSince(metaGet($db, 'worker_seen_at'));
+    $expected = (int)run($db, 'SELECT files_seen FROM scans WHERE complete = 1 AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1')->fetchColumn();
+    if ($scan) {
+        foreach (['id', 'files_seen', 'folders', 'tagged', 'errors', 'complete', 'pruned'] as $c) $scan[$c] = $scan[$c] === null ? null : (int)$scan[$c];
+        $scan['elapsed'] = $running ? secsSince($scan['started_at']) : null;
+        $scan['stale'] = $stale;
+        $scan['beat_age'] = $beat;
+    }
+    return [
+        'ok' => true, 'state' => $state, 'scan' => $scan, 'expected' => $expected,
+        'tracks' => (int)run($db, 'SELECT COUNT(*) FROM tracks WHERE deleted = 0')->fetchColumn(),
+        'worker_age' => $seen, 'worker_online' => $running || ($seen !== null && $seen < WORKER_SEEN_SECS),
+    ];
+}
+
 try {
 switch ($action) {
 
@@ -454,9 +513,49 @@ case 'cover': {
 //           (an empty or half-failed listing must not empty the player).
 // ============================================================
 
+// ---- scan_status / scan_request: the page's scan button ----------------
+case 'scan_status':
+    jsonOut(scanStatus($db));
+
+case 'scan_request': {
+    if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') fail(405, 'POST only');
+    $st = scanStatus($db);
+    if ($st['state'] === 'idle') {
+        metaSet($db, 'scan_requested_at', gmdate('c'));
+        $st = scanStatus($db);
+    }
+    jsonOut($st);
+}
+
 case 'audio_worker_start': {
-    run($db, 'INSERT INTO scans(started_at, complete) VALUES (:t, 0)', [':t' => gmdate('c')]);
+    $now = gmdate('c');
+    run($db, 'INSERT INTO scans(started_at, heartbeat, phase, complete) VALUES (:t, :t, :p, 0)', [':t' => $now, ':p' => 'starting']);
+    metaSet($db, 'scan_requested_at', null);
+    metaSet($db, 'scan_claimed_at', null);
     jsonOut(['ok' => true, 'scan_id' => (int)$db->lastInsertId()]);
+}
+
+// The gateway asks every 30 s whether the page wants a scan. Taking the
+// request clears it, so one click starts one scan.
+case 'audio_worker_poll': {
+    metaSet($db, 'worker_seen_at', gmdate('c'));
+    $want = metaGet($db, 'scan_requested_at') !== null;
+    if ($want) {
+        metaSet($db, 'scan_requested_at', null);
+        metaSet($db, 'scan_claimed_at', gmdate('c'));
+    }
+    jsonOut(['ok' => true, 'requested' => $want]);
+}
+
+case 'audio_worker_progress': {
+    $scan = (int)($in['scan_id'] ?? 0);
+    if ($scan <= 0) fail(400, 'scan_id needed');
+    run($db, 'UPDATE scans SET folders = :f, files_seen = :s, tagged = :t, errors = :e, phase = :p, heartbeat = :h
+               WHERE id = :i AND finished_at IS NULL',
+        [':f' => (int)($in['folders'] ?? 0), ':s' => (int)($in['files'] ?? 0), ':t' => (int)($in['tagged'] ?? 0),
+         ':e' => (int)($in['errors'] ?? 0), ':p' => substr((string)($in['phase'] ?? 'scanning'), 0, 40),
+         ':h' => gmdate('c'), ':i' => $scan]);
+    jsonOut(['ok' => true]);
 }
 
 case 'audio_worker_seen': {
@@ -556,8 +655,10 @@ case 'audio_worker_finish': {
                           [':n' => gmdate('c'), ':s' => $scan])->rowCount();
         }
     }
-    run($db, 'UPDATE scans SET finished_at = :t, files_seen = :f, complete = :c, pruned = :p WHERE id = :i',
-        [':t' => gmdate('c'), ':f' => $seen, ':c' => $complete ? 1 : 0, ':p' => $pruned, ':i' => $scan]);
+    $err  = substr(trim((string)($in['error'] ?? '')), 0, 300);
+    $note = $err !== '' ? 'stopped: ' . $err : $skipped;
+    run($db, 'UPDATE scans SET finished_at = :t, files_seen = :f, complete = :c, pruned = :p, phase = :ph, note = :n, heartbeat = :t WHERE id = :i',
+        [':t' => gmdate('c'), ':f' => $seen, ':c' => $complete ? 1 : 0, ':p' => $pruned, ':ph' => $err !== '' ? 'failed' : 'done', ':n' => $note, ':i' => $scan]);
     jsonOut(['ok' => true, 'pruned' => $pruned, 'skipped_prune' => $skipped]);
 }
 

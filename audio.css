@@ -52,6 +52,45 @@ button { cursor: pointer; background: none; border: 0; padding: 0; }
 }
 #shuffleall:hover { filter: brightness(1.08); }
 
+#scanbtn {
+  display: inline-flex; align-items: center; gap: 6px; padding: 8px 11px; border-radius: 8px;
+  border: 1px solid var(--line); color: var(--dim); white-space: nowrap;
+}
+#scanbtn:hover, #scanbtn[aria-expanded="true"] { color: var(--text); border-color: var(--accent); }
+#scanbtn .ic { font-size: 16px; line-height: 1; display: inline-block; }
+#scanbtn.busy { color: var(--accent); border-color: var(--accent); }
+#scanbtn.busy .ic { animation: spin 1.2s linear infinite; }
+#scanbtn.bad { color: var(--danger); border-color: var(--danger); }
+#scanlabel { font: 12px var(--mono); }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- scan panel ---------- */
+#scanpanel {
+  position: fixed; top: 58px; right: 16px; z-index: 40; width: min(380px, calc(100vw - 24px));
+  padding: 14px 16px 16px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line);
+  box-shadow: 0 10px 34px rgba(0, 0, 0, .55);
+}
+#scanpanel .shead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+#scanclose { font-size: 20px; line-height: 1; color: var(--dim); padding: 2px 8px; border-radius: 6px; }
+#scanclose:hover { color: var(--text); background: var(--panel2); }
+.smsg { min-height: 20px; margin-bottom: 10px; }
+.sbar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin-bottom: 12px; }
+.sbar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .5s; }
+.sbar.indet i { width: 35%; animation: slide 1.4s ease-in-out infinite alternate; }
+@keyframes slide { from { margin-left: 0; } to { margin-left: 65%; } }
+.sbar.off { visibility: hidden; }
+.snums { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px 14px; margin: 0 0 12px; }
+.snums div { min-width: 0; }
+.snums dt { color: var(--dim); font-size: 11.5px; }
+.snums dd { margin: 0; font: 15px var(--mono); }
+.swarn { margin-bottom: 12px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--danger); color: var(--danger); font-size: 12.5px; }
+.sbtns { display: flex; gap: 8px; flex-wrap: wrap; }
+.sbtns button { padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line); }
+.sbtns button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.sbtns button.primary { background: var(--accent); color: #06282c; font-weight: 600; border-color: var(--accent); }
+.sbtns button.primary:hover:not(:disabled) { color: #06282c; filter: brightness(1.08); }
+.sbtns button:disabled { opacity: .5; cursor: default; }
+
 /* ---------- main ---------- */
 #view {
   max-width: 1100px; margin: 0 auto; outline: none;
@@ -238,6 +277,8 @@ input[type="range"]::-moz-range-thumb { width: 14px; height: 14px; border-radius
   #tabs a { padding: 6px 10px; }
   #searchform { order: 2; flex: 1 1 120px; max-width: none; margin-left: 0; }
   #shuffleall { padding: 8px 10px; }
+  #scanbtn { padding: 8px 10px; }
+  #scanpanel { top: 96px; right: 12px; }
   #view { padding-left: 12px; padding-right: 12px; }
   .pagehead .cover { width: 104px; height: 104px; }
   h1.title { font-size: 19px; }
