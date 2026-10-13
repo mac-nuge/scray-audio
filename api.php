@@ -154,6 +154,32 @@ SQL);
         $db->exec('CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)');
         $db->exec('PRAGMA user_version = 2');
         $db->commit();
+        $ver = 2;
+    }
+    if ($ver < 3) {
+        // playlists. An item is one place in a playlist, so a track can appear twice.
+        // It points at tracks.id; rescans keep a path's id, so renames of tags are fine,
+        // while a file moved to a new path becomes a new track and drops out of the list.
+        $db->beginTransaction();
+        $db->exec(<<<'SQL'
+CREATE TABLE IF NOT EXISTS playlists (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name       TEXT NOT NULL,
+  created_at TEXT,
+  updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS playlist_items (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  playlist_id INTEGER NOT NULL,
+  pos         INTEGER NOT NULL,
+  track_id    INTEGER NOT NULL,
+  added_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS playlist_items_pl ON playlist_items(playlist_id, pos);
+CREATE INDEX IF NOT EXISTS playlist_items_tr ON playlist_items(track_id);
+SQL);
+        $db->exec('PRAGMA user_version = 3');
+        $db->commit();
     }
     return $db;
 }
@@ -311,6 +337,91 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
     if (!is_array($in)) fail(400, 'body is not JSON');
 }
 
+
+// ---- playlists ---------------------------------------------------------
+const PL_MAX_NAME  = 100;
+const PL_MAX_ITEMS = 50000;
+const PL_MAX_BATCH = 20000;
+
+function plName(array $in): string {
+    $n = trim((string)preg_replace('/\s+/u', ' ', (string)($in['name'] ?? '')));
+    if ($n === '') fail(400, 'a playlist needs a name');
+    if (mb_strlen($n, 'UTF-8') > PL_MAX_NAME) fail(400, 'that name is too long (' . PL_MAX_NAME . ' characters at most)');
+    return $n;
+}
+function plNameTaken(PDO $db, string $name, int $except = 0): bool {
+    $rows = run($db, 'SELECT id, name FROM playlists')->fetchAll();   // folded in PHP: SQLite NOCASE is ASCII only
+    $want = foldText($name);
+    foreach ($rows as $r) if ((int)$r['id'] !== $except && foldText((string)$r['name']) === $want) return true;
+    return false;
+}
+function plId(array $in): int {
+    $id = (int)($in['id'] ?? $_GET['id'] ?? 0);
+    if ($id <= 0) fail(400, 'id needed');
+    return $id;
+}
+function plRow(PDO $db, int $id): array {
+    $r = run($db, 'SELECT id, name, created_at, updated_at FROM playlists WHERE id = :i', [':i' => $id])->fetch();
+    if (!$r) fail(404, 'no such playlist');
+    return $r;
+}
+/** Ids from the request, whole numbers only, at most $PL_MAX_BATCH. */
+function plIds($v, string $what): array {
+    if (!is_array($v)) fail(400, "{$what}[] needed");
+    if (count($v) > PL_MAX_BATCH) fail(400, 'too many at once');
+    $out = [];
+    foreach ($v as $x) { $i = (int)$x; if ($i > 0) $out[] = $i; }
+    return $out;
+}
+/** Which of these track ids exist and are not gone? */
+function plLiveTrackIds(PDO $db, array $ids): array {
+    $live = [];
+    foreach (array_chunk(array_values(array_unique($ids)), 500) as $chunk) {
+        $in = implode(',', array_fill(0, count($chunk), '?'));
+        foreach (run($db, "SELECT id FROM tracks WHERE deleted = 0 AND id IN ($in)", $chunk)->fetchAll() as $r) $live[(int)$r['id']] = true;
+    }
+    return $live;
+}
+function plTouch(PDO $db, int $id): void {
+    run($db, 'UPDATE playlists SET updated_at = :t WHERE id = :i', [':t' => gmdate('c'), ':i' => $id]);
+}
+/** Append track ids at the end, in the order given (duplicates allowed). Returns how many went in. */
+function plAppend(PDO $db, int $pl, array $ids): int {
+    $live = plLiveTrackIds($db, $ids);
+    $ids = array_values(array_filter($ids, static fn($i) => isset($live[$i])));
+    $have = (int)run($db, 'SELECT COUNT(*) FROM playlist_items WHERE playlist_id = :p', [':p' => $pl])->fetchColumn();
+    if ($have + count($ids) > PL_MAX_ITEMS) fail(400, 'a playlist holds at most ' . number_format(PL_MAX_ITEMS) . ' tracks');
+    $pos = (int)run($db, 'SELECT COALESCE(MAX(pos), 0) FROM playlist_items WHERE playlist_id = :p', [':p' => $pl])->fetchColumn();
+    $ins = $db->prepare('INSERT INTO playlist_items(playlist_id, pos, track_id, added_at) VALUES (:p, :o, :t, :a)');
+    $now = gmdate('c');
+    foreach ($ids as $t) { $ins->execute([':p' => $pl, ':o' => ++$pos, ':t' => $t, ':a' => $now]); }
+    plTouch($db, $pl);
+    return count($ids);
+}
+function plRenumber(PDO $db, int $pl, array $itemIds): void {
+    $up = $db->prepare('UPDATE playlist_items SET pos = :o WHERE id = :i AND playlist_id = :p');
+    $o = 0;
+    foreach ($itemIds as $i) $up->execute([':o' => ++$o, ':i' => $i, ':p' => $pl]);
+}
+function plItemIds(PDO $db, int $pl): array {
+    return array_map('intval', run($db, 'SELECT id FROM playlist_items WHERE playlist_id = :p ORDER BY pos, id', [':p' => $pl])->fetchAll(PDO::FETCH_COLUMN));
+}
+/** A playlist's tracks in order, each with its item id ("entry"); the ones no longer in the library are counted, not listed. */
+function plTracks(PDO $db, int $pl): array {
+    $items = run($db, 'SELECT id, track_id FROM playlist_items WHERE playlist_id = :p ORDER BY pos, id', [':p' => $pl])->fetchAll();
+    $byId = [];
+    foreach (array_chunk(array_values(array_unique(array_map(static fn($r) => (int)$r['track_id'], $items))), 500) as $chunk) {
+        $in = implode(',', array_fill(0, count($chunk), '?'));
+        foreach (run($db, 'SELECT ' . TRACK_COLS . " FROM tracks WHERE deleted = 0 AND id IN ($in)", $chunk)->fetchAll() as $r) $byId[(int)$r['id']] = $r;
+    }
+    $tracks = []; $missing = 0;
+    foreach ($items as $it) {
+        $r = $byId[(int)$it['track_id']] ?? null;
+        if ($r === null) { $missing++; continue; }
+        $tracks[] = shapeTrack($r) + ['entry' => (int)$it['id']];
+    }
+    return [$tracks, $missing];
+}
 
 // ---- scan status -------------------------------------------------------
 // A scan is "running" while its heartbeat is fresh; one that stopped updating
@@ -512,6 +623,107 @@ case 'cover': {
 //           for a complete walk, and never if it would wipe most of the library
 //           (an empty or half-failed listing must not empty the player).
 // ============================================================
+
+// ---- playlists --------------------------------------------------------
+case 'playlists': {
+    $rows = run($db, "SELECT p.id, p.name, p.updated_at,
+                             COUNT(t.id) AS tracks, COALESCE(SUM(t.duration_ms), 0) AS ms,
+                             COUNT(i.id) - COUNT(t.id) AS missing,
+                             (SELECT t2.id FROM playlist_items i2 JOIN tracks t2 ON t2.id = i2.track_id
+                               WHERE i2.playlist_id = p.id AND t2.deleted = 0 AND t2.cover IS NOT NULL
+                               ORDER BY i2.pos LIMIT 1) AS art
+                        FROM playlists p
+                        LEFT JOIN playlist_items i ON i.playlist_id = p.id
+                        LEFT JOIN tracks t ON t.id = i.track_id AND t.deleted = 0
+                       GROUP BY p.id")->fetchAll();
+    usort($rows, static fn($a, $b) => strcmp(foldText((string)$a['name']), foldText((string)$b['name'])));
+    jsonOut(['ok' => true, 'playlists' => array_map(static fn($r) => [
+        'id' => (int)$r['id'], 'name' => (string)$r['name'], 'tracks' => (int)$r['tracks'], 'ms' => (int)$r['ms'],
+        'missing' => (int)$r['missing'], 'art' => $r['art'] === null ? null : (int)$r['art'], 'updated' => $r['updated_at'],
+    ], $rows)]);
+}
+
+case 'playlist': {
+    $pl = plRow($db, plId($in));
+    [$tracks, $missing] = plTracks($db, (int)$pl['id']);
+    $ms = 0; $art = null;
+    foreach ($tracks as $t) { $ms += (int)($t['ms'] ?? 0); if ($art === null && $t['cover']) $art = $t['id']; }
+    jsonOut(['ok' => true, 'playlist' => ['id' => (int)$pl['id'], 'name' => (string)$pl['name'], 'tracks' => count($tracks), 'ms' => $ms, 'missing' => $missing, 'art' => $art],
+             'tracks' => $tracks]);
+}
+
+case 'playlist_create': {
+    $name = plName($in);
+    if (plNameTaken($db, $name)) fail(409, "you already have a playlist called “$name”");
+    $ids = isset($in['track_ids']) ? plIds($in['track_ids'], 'track_ids') : [];
+    $db->beginTransaction();
+    run($db, 'INSERT INTO playlists(name, created_at, updated_at) VALUES (:n, :t, :t)', [':n' => $name, ':t' => gmdate('c')]);
+    $id = (int)$db->lastInsertId();
+    $added = $ids ? plAppend($db, $id, $ids) : 0;
+    $db->commit();
+    jsonOut(['ok' => true, 'id' => $id, 'name' => $name, 'added' => $added]);
+}
+
+case 'playlist_rename': {
+    $id = plId($in); plRow($db, $id);
+    $name = plName($in);
+    if (plNameTaken($db, $name, $id)) fail(409, "you already have a playlist called “$name”");
+    run($db, 'UPDATE playlists SET name = :n, updated_at = :t WHERE id = :i', [':n' => $name, ':t' => gmdate('c'), ':i' => $id]);
+    jsonOut(['ok' => true, 'name' => $name]);
+}
+
+case 'playlist_delete': {
+    $id = plId($in); plRow($db, $id);
+    $db->beginTransaction();
+    run($db, 'DELETE FROM playlist_items WHERE playlist_id = :i', [':i' => $id]);
+    run($db, 'DELETE FROM playlists WHERE id = :i', [':i' => $id]);
+    $db->commit();
+    jsonOut(['ok' => true]);
+}
+
+case 'playlist_add': {
+    $id = plId($in); plRow($db, $id);
+    $ids = plIds($in['track_ids'] ?? null, 'track_ids');
+    $db->beginTransaction();
+    $added = plAppend($db, $id, $ids);
+    $db->commit();
+    jsonOut(['ok' => true, 'added' => $added, 'skipped' => count($ids) - $added]);
+}
+
+// entries[] are item ids from "playlist". missing:true drops every item whose track has left the library.
+case 'playlist_remove': {
+    $id = plId($in); plRow($db, $id);
+    $db->beginTransaction();
+    $gone = 0;
+    if (!empty($in['missing'])) {
+        $gone += run($db, 'DELETE FROM playlist_items WHERE playlist_id = :p AND track_id NOT IN (SELECT id FROM tracks WHERE deleted = 0)', [':p' => $id])->rowCount();
+    }
+    $entries = isset($in['entries']) ? plIds($in['entries'], 'entries') : [];
+    foreach ($entries as $e) $gone += run($db, 'DELETE FROM playlist_items WHERE id = :e AND playlist_id = :p', [':e' => $e, ':p' => $id])->rowCount();
+    plRenumber($db, $id, plItemIds($db, $id));
+    plTouch($db, $id);
+    $db->commit();
+    jsonOut(['ok' => true, 'removed' => $gone]);
+}
+
+// Put one item before another (before: item id), or at the end (before: null/0).
+case 'playlist_move': {
+    $id = plId($in); plRow($db, $id);
+    $entry = (int)($in['entry'] ?? 0);
+    $before = (int)($in['before'] ?? 0);
+    $order = plItemIds($db, $id);
+    if (!in_array($entry, $order, true)) fail(404, 'no such entry in this playlist');
+    if ($before !== 0 && !in_array($before, $order, true)) fail(404, 'no such entry to move before');
+    if ($before === $entry) jsonOut(['ok' => true]);
+    $order = array_values(array_filter($order, static fn($x) => $x !== $entry));
+    $at = $before === 0 ? count($order) : (int)array_search($before, $order, true);
+    array_splice($order, $at, 0, [$entry]);
+    $db->beginTransaction();
+    plRenumber($db, $id, $order);
+    plTouch($db, $id);
+    $db->commit();
+    jsonOut(['ok' => true]);
+}
 
 // ---- scan_status / scan_request: the page's scan button ----------------
 case 'scan_status':

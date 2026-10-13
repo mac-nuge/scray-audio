@@ -81,6 +81,13 @@ Keys: `Space` play/pause, `N` / `P` next/previous, `J` / `L` (or ←/→) back/f
 `M` mute, `/` search. **+** on a row adds to the queue (Shift: play next). On a phone the lock screen
 controls work (Media Session).
 
+**Menu and playlists.** Right-click a track (or tap its **⋯**; also in the queue and on the now-playing strip) for: Play,
+Play next, Add to queue, Go to album, Go to artist, More by (when the track artist isn't the album artist), Show in
+folder, Add to playlist. The **Playlists** tab lists them; **＋ Playlist** on any album, folder, artist or search page adds all
+of its tracks. Inside a playlist the menu also has Move up / Move down / Remove. Playlists live in the server's database
+(`scray-data/audio.sqlite`), so they are the same on every device. A track is remembered by its place in the library; if a
+file is moved to a new path it drops out of the playlist (the page says how many are hidden, with a button to clear them).
+
 Supported: mp3, flac, m4a, aac, ogg, opus, wav - whatever the browser can decode. Safari doesn't play
 ogg/opus.
 

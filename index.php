@@ -29,6 +29,7 @@ $v = static fn(string $f): string => (string)@filemtime(__DIR__ . '/' . $f);
     <a href="#/artists" data-tab="artists">Artists</a>
     <a href="#/albums" data-tab="albums">Albums</a>
     <a href="#/genres" data-tab="genres">Genres</a>
+    <a href="#/playlists" data-tab="playlists">Playlists</a>
   </nav>
   <form id="searchform" role="search"><input id="search" type="search" placeholder="Search" autocomplete="off" enterkeyhint="search"></form>
   <button id="scanbtn" type="button" title="Library scan" aria-haspopup="dialog" aria-expanded="false"><span class="ic" aria-hidden="true">⟳</span><span id="scanlabel"></span></button>

@@ -214,6 +214,58 @@ def main():
     check("a track with no folder art: cover is 404", c404 == 404, str(c404))
     check("unknown track: url is 404", call("url", {"id": 999999})[0] == 404)
 
+    print("playlists")
+    all_tracks = call("tracks", {"order": "path"})[1]["tracks"]
+    ids = [t["id"] for t in all_tracks]
+    byname = {t["title"]: t["id"] for t in all_tracks}
+    check("no playlists to begin with", call("playlists")[1]["playlists"] == [])
+    check("playlists need a session", call("playlists", cookie=False)[0] == 401 and call("playlist_create", cookie=False, body={"name": "x"})[0] == 401)
+    check("the scanner key can't touch playlists", call("playlists", cookie=False, worker="test-worker-key")[0] == 401)
+    check("a name is required", call("playlist_create", body={"name": "   "})[0] == 400)
+    check("a very long name is refused", call("playlist_create", body={"name": "x" * 101})[0] == 400)
+    st, j = call("playlist_create", body={"name": "  Évening   mix ", "track_ids": [byname["Tune"], byname["Café"], 999999]})
+    pid = j["id"]
+    check("create with tracks (an unknown id is skipped, the name is tidied)", st == 200 and j["added"] == 2 and j["name"] == "Évening mix", str(j))
+    check("names are unique, ignoring case and accents", call("playlist_create", body={"name": "evening MIX"})[0] == 409)
+    st, j = call("playlist_create", body={"name": "Second"})
+    pid2 = j["id"]
+    check("an empty playlist", st == 200 and j["added"] == 0)
+    pls = call("playlists")[1]["playlists"]
+    check("list is sorted by name and has counts", [p["name"] for p in pls] == ["Second", "Évening mix"] or [p["name"] for p in pls] == ["Évening mix", "Second"], str(pls))
+    ev = [p for p in pls if p["id"] == pid][0]
+    check("count, length, no missing", ev["tracks"] == 2 and ev["missing"] == 0 and 5500 < ev["ms"] < 6500, str(ev))
+    j = call("playlist_add", body={"id": pid, "track_ids": [byname["Second"], byname["Tune"], 424242]})[1]
+    check("add appends, duplicates allowed, unknown skipped", j["added"] == 2 and j["skipped"] == 1, str(j))
+    j = call("playlist", {"id": pid})[1]
+    titles = [t["title"] for t in j["tracks"]]
+    check("tracks come back in order, with entry ids", titles == ["Tune", "Café", "Second", "Tune"] and len({t["entry"] for t in j["tracks"]}) == 4, str(titles))
+    check("track facts are the same shape as everywhere else", j["tracks"][1]["albumArtist"] and "ms" in j["tracks"][1] and j["playlist"]["tracks"] == 4, str(j["tracks"][1]))
+    e = [t["entry"] for t in j["tracks"]]
+    call("playlist_move", body={"id": pid, "entry": e[3], "before": e[0]})
+    check("move before another", [t["title"] for t in call("playlist", {"id": pid})[1]["tracks"]] == ["Tune", "Tune", "Café", "Second"])
+    call("playlist_move", body={"id": pid, "entry": e[3]})   # no 'before' = to the end
+    j = call("playlist", {"id": pid})[1]
+    check("move to the end", [t["entry"] for t in j["tracks"]] == [e[0], e[1], e[2], e[3]], str([t["entry"] for t in j["tracks"]]))
+    check("moving something that isn't there is 404", call("playlist_move", body={"id": pid, "entry": 99999})[0] == 404 and call("playlist_move", body={"id": pid2, "entry": e[0]})[0] == 404)
+    j = call("playlist_remove", body={"id": pid, "entries": [e[0], e[0], 777777]})[1]
+    check("remove by entry (the other copy of the track stays)", j["removed"] == 1 and [t["title"] for t in call("playlist", {"id": pid})[1]["tracks"]] == ["Café", "Second", "Tune"])
+    D = sqlite3.connect(DB)
+    D.execute("UPDATE tracks SET deleted = 1 WHERE id = ?", (byname["Tune"],)); D.commit()
+    pl = call("playlist", {"id": pid})[1]
+    check("a track that left the library drops out of the playlist but is counted", pl["playlist"]["missing"] == 1 and [t["title"] for t in pl["tracks"]] == ["Café", "Second"], str(pl["playlist"]))
+    check("the list shows the same count", [p for p in call("playlists")[1]["playlists"] if p["id"] == pid][0]["missing"] == 1)
+    j = call("playlist_remove", body={"id": pid, "missing": True})[1]
+    check("missing ones can be cleared in one go", j["removed"] == 1 and call("playlist", {"id": pid})[1]["playlist"]["missing"] == 0)
+    D.execute("UPDATE tracks SET deleted = 0 WHERE id = ?", (byname["Tune"],)); D.commit(); D.close()
+    check("rename", call("playlist_rename", body={"id": pid, "name": "Late"})[0] == 200 and call("playlist", {"id": pid})[1]["playlist"]["name"] == "Late")
+    check("rename to a taken name is refused", call("playlist_rename", body={"id": pid, "name": "second"})[0] == 409)
+    check("renaming to its own name (different case) is fine", call("playlist_rename", body={"id": pid2, "name": "SECOND"})[0] == 200)
+    check("unknown playlist is 404", call("playlist", {"id": 9999})[0] == 404 and call("playlist_delete", body={"id": 9999})[0] == 404)
+    call("playlist_add", body={"id": pid2, "track_ids": ids})
+    call("playlist_delete", body={"id": pid2})
+    check("delete removes it and its items", [p["id"] for p in call("playlists")[1]["playlists"]] == [pid]
+          and sqlite3.connect(DB).execute("SELECT COUNT(*) FROM playlist_items WHERE playlist_id = ?", (pid2,)).fetchone()[0] == 0)
+
     print("files that go away")
     os.remove(os.path.join(BOX, "Music", "Singles", "loose track.mp3"))
     code, out = scan()

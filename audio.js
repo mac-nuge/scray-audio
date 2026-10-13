@@ -363,8 +363,12 @@
     const from = Math.max(0, P.idx - 3), to = Math.min(n, Math.max(P.idx, 0) + QUEUE_SHOWN);
     for (let i = from; i < to; i++) {
       const t = P.queue[i];
-      list.append(h('li', { class: i === P.idx ? 'now' : '', onclick: () => load(i) },
+      list.append(h('li', {
+        class: i === P.idx ? 'now' : '', onclick: () => load(i),
+        oncontextmenu: e => { e.preventDefault(); openTrackMenu(t, {}, menuAt(e, e.currentTarget), e.currentTarget); },
+      },
         h('span', { class: 'q-t' }, h('b', { text: t.title }), h('i', { text: [t.artist, t.album].filter(Boolean).join(' · ') })),
+        h('button', { class: 'q-m', title: 'More…', 'aria-label': 'More actions', 'aria-haspopup': 'menu', text: '⋯', onclick: e => { e.stopPropagation(); openTrackMenu(t, {}, { el: e.currentTarget, right: true }, e.currentTarget); } }),
         h('button', { class: 'q-x', title: 'Remove', 'aria-label': 'Remove from queue', text: '×', onclick: e => { e.stopPropagation(); removeFromQueue(i); } })));
     }
     if (to < n) list.append(h('li', { class: 'more', text: `…and ${(n - to).toLocaleString()} more` }));
@@ -450,7 +454,8 @@
     const aa = o.albumArtist;
     const showArtist = !aa || tracks.some(t => t.artist && t.artist !== aa);
     const box = h('div', { class: 'tracks' + (o.noAlbum ? ' noalb' : '') + (showArtist ? '' : ' noart') });
-    box.append(h('div', { class: 'thead' }, h('span', { text: '#' }), h('span', { text: 'Title' }), h('span', { text: 'Artist' }), h('span', { text: 'Album' }), h('span', { text: 'Time' }), h('span')));
+    box.append(h('div', { class: 'thead' }, h('span', { text: '#' }), h('span', { text: 'Title' }),
+      showArtist ? h('span', { text: 'Artist' }) : null, o.noAlbum ? null : h('span', { text: 'Album' }), h('span', { text: 'Time' }), h('span')));
     let disc = null;
     const multiDisc = o.discs && new Set(tracks.map(t => t.disc || 1)).size > 1;
     tracks.forEach((t, i) => {
@@ -461,10 +466,20 @@
         h('span', { class: 'art', text: t.artist }),
         h('span', { class: 'alb', text: t.album }),
         h('span', { class: 'dur', text: fmtMs(t.ms) }),
-        h('button', {
-          class: 'add', title: 'Add to queue (Shift: play next)', 'aria-label': 'Add to queue', text: '+',
-          onclick: e => { e.stopPropagation(); enqueue(t, e.shiftKey); },
-        }));
+        h('span', { class: 'acts' },
+          h('button', {
+            class: 'add', title: 'Add to queue (Shift: play next)', 'aria-label': 'Add to queue', text: '+',
+            onclick: e => { e.stopPropagation(); enqueue(t, e.shiftKey); },
+          }),
+          h('button', {
+            class: 'dots', title: 'More: go to album or artist, add to a playlist… (or right-click)', 'aria-label': 'More actions', 'aria-haspopup': 'menu', text: '⋯',
+            onclick: e => { e.stopPropagation(); openTrackMenu(t, { list: tracks, index: i, playlist: o.playlist }, { el: e.currentTarget, right: true }, e.currentTarget); },
+          })));
+      row.addEventListener('contextmenu', e => {
+        e.preventDefault();
+        const at = e.clientX || e.clientY ? { x: e.clientX, y: e.clientY } : { el: row };   // the keyboard's menu key has no pointer
+        openTrackMenu(t, { list: tracks, index: i, playlist: o.playlist }, at, row);
+      });
       row.addEventListener('click', () => startQueue(tracks, i));
       row.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); startQueue(tracks, i); } });
       box.append(row);
@@ -486,7 +501,7 @@
       h('div', { class: 'cs', text: [a.artist, a.year].filter(Boolean).join(' · ') }));
   }
 
-  function actions(getTracks, extra) {
+  function actions(getTracks, extra, o) {
     const run = async shuffle => {
       unlock();
       try { playList(await getTracks(), shuffle); } catch (e) { toast(e.message, true); }
@@ -494,12 +509,206 @@
     return h('div', { class: 'bar' },
       h('button', { class: 'btn go', text: '▶ Play', onclick: () => run(false) }),
       h('button', { class: 'btn', text: '🔀 Shuffle', onclick: () => run(true) }),
+      o && o.noPlaylist ? null : h('button', {
+        class: 'btn', text: '＋ Playlist', title: 'Add these tracks to a playlist', 'aria-haspopup': 'menu',
+        onclick: e => { const b = e.currentTarget; openPicker({ el: b }, b, async () => (await getTracks()).map(t => t.id)); },
+      }),
       extra);
   }
 
+  // ----------------------------------------------- menus, dialogs, playlists
+  // One floating menu (right-click on a track, the ⋯ button, the "＋ Playlist"
+  // button). On a phone it is a sheet at the bottom. A click anywhere else, Escape
+  // or a scroll closes it; arrow keys move, Enter picks.
+  const menu = { el: null, back: null, at: null, from: null };
+
+  function closeMenu() {
+    if (!menu.el) return;
+    menu.el.remove(); menu.back.remove();
+    menu.el = menu.back = null;
+    document.removeEventListener('keydown', menuKeys, true);
+    window.removeEventListener('resize', closeMenu);
+    if (menu.from && document.contains(menu.from)) { try { menu.from.focus({ preventScroll: true }); } catch (e) { /* gone */ } }
+    menu.from = null;
+  }
+
+  function menuKeys(e) {
+    if (e.key === 'Tab') { closeMenu(); return; }
+    e.stopPropagation();                       // the player's shortcuts must not fire behind the menu
+    if (e.key === 'Escape') { e.preventDefault(); closeMenu(); return; }
+    const btns = [...menu.el.querySelectorAll('.mi:not(:disabled)')];
+    if (!btns.length) return;
+    const i = btns.indexOf(document.activeElement);
+    const go = k => { e.preventDefault(); btns[(k + btns.length) % btns.length].focus(); };
+    if (e.key === 'ArrowDown') go(i + 1);
+    else if (e.key === 'ArrowUp') go(i < 0 ? -1 : i - 1);
+    else if (e.key === 'Home') go(0);
+    else if (e.key === 'End') go(-1);
+  }
+
+  function placeMenu() {
+    const el = menu.el, a = menu.at || { x: 0, y: 0 };
+    el.style.maxHeight = (innerHeight - 16) + 'px';
+    const w = el.offsetWidth, hh = el.offsetHeight;
+    let x, y;
+    if (a.el) {
+      const r = a.el.getBoundingClientRect();
+      x = a.right ? r.right - w : r.left;
+      y = r.bottom + 4;
+      if (y + hh > innerHeight - 8) y = r.top - hh - 4;
+    } else { x = a.x; y = a.y; }
+    x = Math.max(8, Math.min(x, innerWidth - w - 8));
+    y = Math.max(8, Math.min(y, innerHeight - hh - 8));
+    el.style.left = x + 'px'; el.style.top = y + 'px';
+  }
+
+  /** items: {label, hint?, arrow?, danger?, disabled?, keep?, onclick} | {sep:true} | {head:'text'} */
+  function paintMenu(items) {
+    const el = menu.el;
+    if (!el) return;
+    el.replaceChildren(...items.map(it => {
+      if (it.sep) return h('div', { class: 'msep', role: 'separator' });
+      if (it.head) return h('div', { class: 'mhead', text: it.head });
+      return h('button', {
+        class: 'mi' + (it.danger ? ' danger' : ''), type: 'button', role: 'menuitem', disabled: it.disabled,
+        onclick: e => { e.stopPropagation(); if (!it.keep) closeMenu(); if (it.onclick) it.onclick(); },
+      }, h('span', { class: 'ml', text: it.label }), it.hint ? h('span', { class: 'mh', text: it.hint }) : null, it.arrow ? h('span', { class: 'ma', text: '›' }) : null);
+    }));
+    placeMenu();
+    const first = el.querySelector('.mi:not(:disabled)');
+    if (first) first.focus({ preventScroll: true });
+  }
+
+  function openMenu(items, at, from) {
+    closeMenu();
+    menu.back = h('div', { class: 'mback', onclick: closeMenu, oncontextmenu: e => { e.preventDefault(); closeMenu(); }, onwheel: closeMenu, ontouchmove: closeMenu });
+    menu.el = h('div', { class: 'cmenu', role: 'menu' });
+    menu.at = at; menu.from = from || null;
+    document.body.append(menu.back, menu.el);
+    document.addEventListener('keydown', menuKeys, true);
+    window.addEventListener('resize', closeMenu);
+    paintMenu(items);
+  }
+
+  /** A small modal: a title, optional text, optional text box. Resolves to the typed text (or true), or null if cancelled. */
+  function dialog(o) {
+    return new Promise(resolve => {
+      const prev = document.activeElement;
+      const input = o.value !== undefined ? h('input', { class: 'dinput', type: 'text', value: o.value, maxlength: '100', autocomplete: 'off', 'aria-label': o.title }) : null;
+      const ok = h('button', { class: 'btn go' + (o.danger ? ' danger' : ''), type: 'submit', text: o.ok || 'OK' });
+      const cancel = h('button', { class: 'btn', type: 'button', text: 'Cancel' });
+      const box = h('form', { class: 'dbox', role: 'dialog', 'aria-modal': 'true', 'aria-label': o.title },
+        h('h3', { text: o.title }), o.text ? h('p', { text: o.text }) : null, input, h('div', { class: 'dbtns' }, cancel, ok));
+      const back = h('div', { class: 'dback' }, box);
+      const done = v => {
+        document.removeEventListener('keydown', keys, true);
+        back.remove();
+        if (prev && document.contains(prev)) { try { prev.focus({ preventScroll: true }); } catch (e) { /* gone */ } }
+        resolve(v);
+      };
+      const keys = e => {
+        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(null); return; }
+        if (e.key === 'Tab') {                     // keep the focus inside the box
+          const f = [...box.querySelectorAll('input, button')];
+          const i = f.indexOf(document.activeElement);
+          e.preventDefault();
+          f[(i + (e.shiftKey ? -1 : 1) + f.length) % f.length].focus();
+        }
+        e.stopPropagation();
+      };
+      box.addEventListener('submit', e => { e.preventDefault(); done(input ? input.value : true); });
+      cancel.addEventListener('click', () => done(null));
+      back.addEventListener('mousedown', e => { if (e.target === back) done(null); });
+      document.body.append(back);
+      document.addEventListener('keydown', keys, true);
+      (input || ok).focus();
+      if (input) input.select();
+    });
+  }
+
+  // ---- playlist actions (each toasts its own errors)
+  const onPlaylist = id => location.hash === `#/playlist/${id}`;
+
+  async function newPlaylist(getIds) {
+    const name = await dialog({ title: 'New playlist', value: '', ok: 'Create' });
+    if (name == null) return;
+    try {
+      const ids = getIds ? await getIds() : [];
+      const j = await apiPost('playlist_create', { name, track_ids: ids });
+      toast(j.added ? `Created “${j.name}” with ${plural(j.added, 'track')}` : `Created “${j.name}”`);
+      if (location.hash === '#/playlists') route();
+    } catch (e) { toast(e.message, true); }
+  }
+
+  async function addToPlaylist(pl, getIds) {
+    try {
+      const ids = await getIds();
+      if (!ids.length) { toast('Nothing to add'); return; }
+      const j = await apiPost('playlist_add', { id: pl.id, track_ids: ids });
+      toast(`Added ${plural(j.added, 'track')} to “${pl.name}”`);
+      if (onPlaylist(pl.id)) refreshPlaylist(pl.id);
+    } catch (e) { toast(e.message, true); }
+  }
+
+  /** Fill the open menu with the playlists to choose from (and "New playlist…"). back = items to return to. */
+  async function showPicker(getIds, back) {
+    const head = [...(back ? [{ label: '‹ Back', keep: true, onclick: () => paintMenu(back) }] : []), { head: 'Add to playlist' }];
+    paintMenu([...head, { label: 'Loading…', disabled: true }]);
+    let pls;
+    try { pls = (await api('playlists')).playlists; } catch (e) { closeMenu(); toast(e.message, true); return; }
+    if (!menu.el) return;                                  // closed while we waited
+    paintMenu([...head, { label: '＋ New playlist…', onclick: () => newPlaylist(getIds) }, ...(pls.length ? [{ sep: true }] : []),
+      ...pls.map(p => ({ label: p.name, hint: String(p.tracks), onclick: () => addToPlaylist(p, getIds) }))]);
+  }
+
+  function openPicker(at, from, getIds) { openMenu([], at, from); showPicker(getIds, null); }
+
+  async function renamePlaylist(p, after) {
+    const name = await dialog({ title: 'Rename playlist', value: p.name, ok: 'Rename' });
+    if (name == null || name === p.name) return;
+    try { await apiPost('playlist_rename', { id: p.id, name }); toast('Renamed'); after(); } catch (e) { toast(e.message, true); }
+  }
+
+  async function deletePlaylist(p, after) {
+    const yes = await dialog({ title: `Delete “${p.name}”?`, text: 'The tracks stay in your library; only the playlist goes.', ok: 'Delete', danger: true });
+    if (!yes) return;
+    try { await apiPost('playlist_delete', { id: p.id }); toast(`Deleted “${p.name}”`); after(); } catch (e) { toast(e.message, true); }
+  }
+
+  async function playlistOp(id, action, body, msg) {
+    try { await apiPost(action, { id, ...body }); if (msg) toast(msg); } catch (e) { toast(e.message, true); }
+    if (onPlaylist(id)) refreshPlaylist(id);
+  }
+
+  function trackMenuItems(t, ctx) {
+    const go = hash => () => { location.hash = hash; };
+    const items = [];
+    if (ctx.list) items.push({ label: 'Play', onclick: () => startQueue(ctx.list, ctx.index) });
+    items.push({ label: 'Play next', onclick: () => enqueue(t, true) }, { label: 'Add to queue', onclick: () => enqueue(t, false) }, { sep: true });
+    if (t.album && t.albumArtist) items.push({ label: 'Go to album', hint: t.album, onclick: go(`#/album/${enc(t.albumArtist)}/${enc(t.album)}`) });
+    if (t.albumArtist) items.push({ label: 'Go to artist', hint: t.albumArtist, onclick: go(`#/artist/${enc(t.albumArtist)}`) });
+    if (t.artist && t.artist !== t.albumArtist) items.push({ label: 'More by', hint: t.artist, onclick: go(`#/search/${enc(t.artist)}`) });
+    if (t.folder) items.push({ label: 'Show in folder', hint: t.folder.split('/').pop(), onclick: go(`#/f/${enc(t.folder)}`) });
+    items.push({ sep: true });
+    items.push({ label: 'Add to playlist', arrow: true, keep: true, onclick: () => showPicker(async () => [t.id], items) });
+    if (ctx.playlist && t.entry) {
+      const id = ctx.playlist.id, i = ctx.index, l = ctx.list;
+      items.push({ sep: true });
+      if (i > 0) items.push({ label: 'Move up', onclick: () => playlistOp(id, 'playlist_move', { entry: t.entry, before: l[i - 1].entry }) });
+      if (i < l.length - 1) items.push({ label: 'Move down', onclick: () => playlistOp(id, 'playlist_move', { entry: t.entry, before: l[i + 2] ? l[i + 2].entry : 0 }) });
+      items.push({ label: 'Remove from this playlist', danger: true, onclick: () => playlistOp(id, 'playlist_remove', { entries: [t.entry] }, `Removed “${t.title}”`) });
+    }
+    return items;
+  }
+
+  function openTrackMenu(t, ctx, at, from) { openMenu(trackMenuItems(t, ctx || {}), at, from); }
+
+  // queue rows and the now-playing strip get the same menu
+  function menuAt(e, el) { return e.clientX || e.clientY ? { x: e.clientX, y: e.clientY } : { el }; }
+
   // ------------------------------------------------------------------ views
   let viewSeq = 0;
-  const show = (my, ...els) => { if (my === viewSeq) { view.replaceChildren(...els); markNow(); } };
+  const show = (my, ...els) => { if (my === viewSeq) { view.replaceChildren(...els.filter(Boolean)); markNow(); } };
 
   async function viewFolders(my, path) {
     const [j, st] = await Promise.all([api('ls', { path }), path ? null : api('stats').catch(() => null)]);
@@ -608,6 +817,65 @@
       trackList(tracks, { noAlbum: true, albumArtist: artist, trackNumbers: true, discs: true }));
   }
 
+  // ---- playlists
+  async function refreshPlaylist(id) {
+    const y = window.scrollY, my = ++viewSeq;
+    try { await viewPlaylist(my, id); window.scrollTo(0, y); } catch (e) { toast(e.message, true); }
+  }
+
+  function playlistRow(p) {
+    const tracksOf = async () => (await api('playlist', { id: p.id })).tracks;
+    const play = shuffle => async e => {
+      e.preventDefault(); e.stopPropagation(); unlock();
+      try { playList(await tracksOf(), shuffle); } catch (err) { toast(err.message, true); }
+    };
+    const row = h('a', { class: 'plrow', href: `#/playlist/${p.id}` },
+      coverEl(p.art),
+      h('span', { class: 'pn' }, h('b', { text: p.name }),
+        h('i', { text: [plural(p.tracks, 'track'), p.ms ? longTime(p.ms) : '', p.missing ? `${p.missing} missing` : ''].filter(Boolean).join(' · ') })),
+      h('button', { class: 'pl', title: 'Play', 'aria-label': `Play ${p.name}`, text: '▶', onclick: play(false) }),
+      h('button', { class: 'pl', title: 'Shuffle', 'aria-label': `Shuffle ${p.name}`, text: '🔀', onclick: play(true) }));
+    row.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      openMenu([
+        { label: 'Play', onclick: () => { unlock(); tracksOf().then(l => playList(l, false)).catch(err => toast(err.message, true)); } },
+        { label: 'Shuffle', onclick: () => { unlock(); tracksOf().then(l => playList(l, true)).catch(err => toast(err.message, true)); } },
+        { sep: true },
+        { label: 'Rename…', onclick: () => renamePlaylist(p, route) },
+        { label: 'Delete…', danger: true, onclick: () => deletePlaylist(p, route) },
+      ], menuAt(e, row), row);
+    });
+    return row;
+  }
+
+  async function viewPlaylists(my) {
+    const { playlists } = await api('playlists');
+    show(my,
+      h('h1', { class: 'title', text: 'Playlists' }),
+      h('div', { class: 'bar' }, h('button', { class: 'btn go', text: '＋ New playlist', onclick: () => newPlaylist(null) }),
+        h('span', { class: 'meta', text: plural(playlists.length, 'playlist') })),
+      playlists.length
+        ? h('div', { class: 'pls' }, playlists.map(playlistRow))
+        : h('div', { class: 'empty', text: 'No playlists yet. Make one with “＋ New playlist”, or use ⋯ on any track (or “＋ Playlist” on an album or folder) and choose Add to playlist.' }));
+  }
+
+  async function viewPlaylist(my, id) {
+    const { playlist: p, tracks } = await api('playlist', { id });
+    const meta = [plural(p.tracks, 'track'), p.ms ? longTime(p.ms) : ''].filter(Boolean).join(' · ');
+    const after = () => { location.hash = '#/playlists'; };
+    show(my,
+      h('div', { class: 'pagehead' }, coverEl(p.art), h('div', {},
+        h('h1', { class: 'title', text: p.name }),
+        h('div', { class: 'subtitle', text: meta }))),
+      actions(async () => tracks, h('span', { class: 'grp' },
+        h('button', { class: 'btn', text: 'Rename', onclick: () => renamePlaylist(p, () => refreshPlaylist(p.id)) }),
+        h('button', { class: 'btn danger', text: 'Delete', onclick: () => deletePlaylist(p, after) })), { noPlaylist: true }),
+      p.missing ? h('div', { class: 'note' }, `${plural(p.missing, 'track')} no longer in the library (moved or deleted) ${p.missing === 1 ? 'is' : 'are'} hidden. `,
+        h('button', { class: 'lnk', text: 'Remove from this playlist', onclick: () => playlistOp(p.id, 'playlist_remove', { missing: true }, 'Cleared') })) : null,
+      tracks.length ? trackList(tracks, { playlist: { id: p.id } })
+        : h('div', { class: 'empty', text: 'Empty. Use ⋯ on a track, or “＋ Playlist” on an album, folder or search, and add to this playlist.' }));
+  }
+
   async function viewGenres(my) {
     const { genres } = await api('genres');
     show(my, h('h1', { class: 'title', text: 'Genres' }), h('div', { class: 'subtitle', text: plural(genres.length, 'genre') }),
@@ -635,7 +903,7 @@
   }
 
   // ----------------------------------------------------------------- router
-  const TABS = { f: 'folders', '': 'folders', artists: 'artists', artist: 'artists', albums: 'albums', album: 'albums', genres: 'genres', genre: 'genres', search: '' };
+  const TABS = { f: 'folders', '': 'folders', artists: 'artists', artist: 'artists', albums: 'albums', album: 'albums', genres: 'genres', genre: 'genres', playlists: 'playlists', playlist: 'playlists', search: '' };
 
   async function route() {
     const my = ++viewSeq;
@@ -652,6 +920,8 @@
         case 'artist': await viewArtist(my, parts[1] || ''); break;
         case 'albums': await viewAlbums(my); break;
         case 'album': await viewAlbum(my, parts[1] || '', parts[2] || ''); break;
+        case 'playlists': await viewPlaylists(my); break;
+        case 'playlist': await viewPlaylist(my, parseInt(parts[1], 10) || 0); break;
         case 'genres': await viewGenres(my); break;
         case 'genre': await viewGenre(my, parts[1] || ''); break;
         case 'search': $('search').value = parts[1] || ''; await viewSearch(my, parts[1] || ''); break;
@@ -684,9 +954,9 @@
   const scan = { state: 'idle', timer: 0, open: false, prev: null, viewStale: false };
   const ACTIVE = new Set(['requested', 'starting', 'running']);
 
-  async function apiPost(action) {
+  async function apiPost(action, body) {
     let r, j;
-    try { r = await fetch(`${API}?action=${action}`, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: '{}' }); }
+    try { r = await fetch(`${API}?action=${action}`, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }); }
     catch (e) { throw new Error('can’t reach the server'); }
     try { j = await r.json(); } catch (e) { throw new Error(`server answered ${r.status}`); }
     if (!r.ok || !j.ok) throw new Error(j.error || `server answered ${r.status}`);
@@ -802,6 +1072,14 @@
   });
   $('scanrefresh').addEventListener('click', () => { scan.viewStale = false; $('scanrefresh').hidden = true; route(); });
   document.addEventListener('visibilitychange', () => { if (!document.hidden) scanTick(); });
+
+  $('np').addEventListener('contextmenu', e => {
+    const t = P.queue[P.idx];
+    if (!t) return;
+    e.preventDefault();
+    openTrackMenu(t, {}, menuAt(e, $('np')), $('np'));
+  });
+  window.addEventListener('hashchange', closeMenu);
 
   paintControls();
   paintPlay();
