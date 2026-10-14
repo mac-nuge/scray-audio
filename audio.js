@@ -1147,10 +1147,10 @@
       const genre = rel.genres[0] ? titleCase(rel.genres[0]) : '';
       const opts = h('div', { class: 'mbopts' },
         opt('title', 'Track titles', true), opt('artist', 'Track artists', true), opt('no', 'Track and disc numbers', true),
-        opt('album', `Album: “${rel.title}”`, rel.title !== al0), opt('aa', `Album artist: ${rel.artist}`, rel.artist !== a0),
-        rel.year ? opt('year', 'Year: ', !tracks.some(t => t.year), yearSel) : null,
-        genre ? opt('genre', `Genre: ${genre}`, !tracks.some(t => t.genre)) : null,
-        rel.cover ? opt('cover', 'Cover', !tracks.some(t => t.cover), h('img', { class: 'mbthumb', src: rel.coverThumb, alt: '' })) : h('span', { class: 'enote', text: 'No cover on the Cover Art Archive for this one.' }));
+        opt('album', `Album: “${rel.title}”`, true), opt('aa', `Album artist: ${rel.artist}`, true),
+        rel.year ? opt('year', 'Year: ', true, yearSel) : null,
+        genre ? opt('genre', `Genre: ${genre}`, true) : null,
+        rel.cover ? opt('cover', 'Cover', true, h('img', { class: 'mbthumb', src: rel.coverThumb, alt: '' })) : h('span', { class: 'enote', text: 'No cover on the Cover Art Archive for this one.' }));
       const diff = (a, b) => (a === b ? h('span', { text: a || '—' }) : h('span', {}, h('s', { text: a || '—' }), ' → ', h('ins', { text: b })));
       const table = h('div', { class: 'mbtable' }, pairs.map(([t, m]) => h('div', { class: 'mbtr' + (m ? '' : ' none') },
         h('span', { class: 'n', text: m ? `${m.disc > 1 || rel.media.length > 1 ? m.disc + '.' : ''}${m.no}` : '–' }),
@@ -1868,6 +1868,7 @@
       }
     } catch (e) { /* offline: next time */ }
   }
+  if (APP && $('bulkmb')) $('bulkmb').remove();             // the bulk page is for a computer
   const start = () => { paintOffline(); route(); scanTick(); loadLiked(); refreshSaved(); };
   if (OFF) {
     OFF.init().then(() => { if (APP && !APP.key && OFF.count) mode.off = true; }).catch(() => {}).finally(start);

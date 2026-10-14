@@ -19,7 +19,8 @@ DB = os.path.join(WORK, "audio.sqlite")
 API_PORT, BOX_PORT, MB_PORT = 8098, 8099, 8097
 # what php -S needs, besides the database: covers in the work folder, MusicBrainz and the Cover Art Archive faked
 PHP_ENV = {"SCRAY_AUDIO_DATA_DIR": os.path.join(REPO, "tests", "stub-data"), "SCRAY_AUDIO_COVERS_DIR": os.path.join(WORK, "covers"),
-           "SCRAY_AUDIO_MB_BASE": f"http://127.0.0.1:{MB_PORT}/ws/2", "SCRAY_AUDIO_CAA_BASE": f"http://127.0.0.1:{MB_PORT}"}
+           "SCRAY_AUDIO_MB_BASE": f"http://127.0.0.1:{MB_PORT}/ws/2", "SCRAY_AUDIO_CAA_BASE": f"http://127.0.0.1:{MB_PORT}",
+           "SCRAY_AUDIO_MB_GAP": "0.01"}
 API = f"http://127.0.0.1:{API_PORT}/api.php"
 procs = []
 fails = []

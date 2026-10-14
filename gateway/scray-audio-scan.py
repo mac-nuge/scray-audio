@@ -40,6 +40,8 @@ Settings come from the environment (EnvironmentFile=/etc/scray/audio-scan.env):
   SCRAY_WRITE_TAGS        1 lets --poll write edits into the files (default: off;
                           the sub-account must not be read-only)
   SCRAY_WRITE_MAX_MB      largest file it will rewrite (default 600)
+  SCRAY_MB_BUDGET         seconds each --poll spends on a bulk MusicBrainz run
+                          from the page (default 25; 0 = never)
 
 Two ways to run it:
 
@@ -109,6 +111,7 @@ MAX_FILES = int(env("SCRAY_SCAN_MAX", "0") or 0)
 START_CMD = env("SCRAY_SCAN_START_CMD", "systemctl start --no-block scray-audio-scan.service")
 WRITE = env("SCRAY_WRITE_TAGS", "") == "1"
 WRITE_MAX = int(env("SCRAY_WRITE_MAX_MB", "600")) * 1024 * 1024
+MB_BUDGET = float(env("SCRAY_MB_BUDGET", "25"))
 DAV_AUTH = "Basic " + base64.b64encode(f"{DAV_USER}:{DAV_PASS}".encode()).decode()
 
 
@@ -694,7 +697,26 @@ def poll():
         subprocess.run(shlex.split(START_CMD), check=True)
     if res.get("push") and WRITE:
         push()
+    if res.get("mb") and MB_BUDGET > 0:
+        mb_steps()
     return 0
+
+
+def mb_steps():
+    """Work through the bulk MusicBrainz run (bulk-mb.php) for a while. api.php does the matching,
+    one album per call, at MusicBrainz's pace; this only keeps asking until time is up."""
+    end = time.time() + MB_BUDGET
+    n = 0
+    while time.time() < end:
+        r = api("audio_worker_mb_step")
+        if r.get("idle"):
+            break
+        if r.get("busy"):
+            time.sleep(5)
+        elif r.get("state"):
+            n += 1
+    if n:
+        log(f"musicbrainz: {n} album(s) done this round")
 
 
 def main():

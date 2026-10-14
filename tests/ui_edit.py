@@ -89,7 +89,7 @@ try:
             chk("the preview shows old → new", "First Light" in txt and "Second Wind" in txt and "Artist One feat. Guest" in txt, txt)
             chk("no stray text in the preview", "null" not in pg.inner_text(".sheet .sbody"))
             chk("year choices: first released and this release", pg.evaluate("[...document.querySelectorAll('.mbyear option')].map(o => o.value)") == ["1998", "1999"])
-            pg.check(".mbopts input[data-k=cover]")
+            chk("every option is ticked to start with", pg.evaluate("[...document.querySelectorAll('.mbopts input[type=checkbox]')].every(c => c.checked)"))
             tap(".sheet .dbtns .btn.go"); pg.wait_for_selector(".sheet", state="detached", timeout=8000); pg.wait_for_timeout(900)
             chk("applied: titles, album and cover", pg.evaluate(titles) == ["First Light", "Second Wind"] and "Album A (Remastered)" in pg.inner_text("h1.title"), pg.evaluate(titles))
             i = call("track_info", {"id": byname["First"]})[1]

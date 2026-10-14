@@ -488,3 +488,5 @@ input[type="range"]::-moz-range-thumb { width: 14px; height: 14px; border-radius
 .wst.done { color: #4cc38a; }
 .wst.failed { color: var(--danger); }
 .wst.working, .wst.queued { color: #ffb454; }
+
+.slink { display: block; margin-top: 12px; color: var(--accent); font-size: 13px; }

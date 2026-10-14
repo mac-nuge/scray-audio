@@ -28,6 +28,9 @@ function jsonOut(array $a, int $code = 200): void {
 function fail(int $code, string $msg): void {
     jsonOut(['ok' => false, 'error' => $msg], $code);
 }
+/** A MusicBrainz / Cover Art Archive / cover problem, with the HTTP status to answer. The bulk matcher catches these. */
+final class MbError extends RuntimeException {}
+
 
 $action = (string)($_GET['action'] ?? '');
 
@@ -300,6 +303,30 @@ CREATE INDEX IF NOT EXISTS push_jobs_track ON push_jobs(track_id, id);
 CREATE INDEX IF NOT EXISTS push_jobs_state ON push_jobs(state);
 SQL);
         $db->exec('PRAGMA user_version = 6');
+        $db->commit();
+        $ver = 6;
+    }
+    if ($ver < 7) {
+        // The bulk MusicBrainz matcher: one row per album (an album tag in one folder), and its runs.
+        $db->beginTransaction();
+        $db->exec(<<<'SQL'
+CREATE TABLE IF NOT EXISTS mb_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, mode TEXT, opts TEXT, state TEXT,   -- running | paused | stopped | done
+  total INTEGER, started_at TEXT, finished_at TEXT, last_step_at TEXT, last_step_by TEXT
+);
+CREATE TABLE IF NOT EXISTS mb_bulk (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  folder TEXT NOT NULL, album TEXT NOT NULL, artist TEXT NOT NULL DEFAULT '',
+  track_ids TEXT, tracks INTEGER,
+  run_id INTEGER,
+  state TEXT NOT NULL,          -- pending | working | matched | review | none | skipped | error | undone
+  reason TEXT, release_id TEXT, release_title TEXT, release_artist TEXT, release_year INTEGER, has_cover INTEGER,
+  candidates TEXT, started_at TEXT, updated_at TEXT,
+  UNIQUE (folder, album)
+);
+CREATE INDEX IF NOT EXISTS mb_bulk_state ON mb_bulk(state, run_id);
+SQL);
+        $db->exec('PRAGMA user_version = 7');
         $db->commit();
     }
     return $db;
@@ -618,16 +645,16 @@ function coverLink(PDO $db, array $secrets, int $id): ?string {
 }
 /** Keep an image you chose. Named by its content, so the same picture is stored once. Returns the file name. */
 function storeCover(string $bytes): string {
-    if (strlen($bytes) > 10 * 1024 * 1024) fail(400, 'that picture is too big (10 MB at most)');
+    if (strlen($bytes) > 10 * 1024 * 1024) throw new MbError('that picture is too big (10 MB at most)', 400);
     $info = @getimagesizefromstring($bytes);
     $ext = [IMAGETYPE_JPEG => 'jpg', IMAGETYPE_PNG => 'png', IMAGETYPE_WEBP => 'webp'][$info[2] ?? 0] ?? null;
-    if (!$info || $ext === null) fail(400, 'that is not a JPEG, PNG or WebP picture');
-    if (!is_dir(AUDIO_COVERS_DIR) && !@mkdir(AUDIO_COVERS_DIR, 0755, true)) fail(500, 'could not make the covers folder');
+    if (!$info || $ext === null) throw new MbError('that is not a JPEG, PNG or WebP picture', 400);
+    if (!is_dir(AUDIO_COVERS_DIR) && !@mkdir(AUDIO_COVERS_DIR, 0755, true)) throw new MbError('could not make the covers folder', 500);
     $name = sha1($bytes) . '.' . $ext;
     $file = AUDIO_COVERS_DIR . '/' . $name;
     if (!is_file($file)) {
         $tmp = $file . '.' . bin2hex(random_bytes(4));
-        if (@file_put_contents($tmp, $bytes) !== strlen($bytes) || !@rename($tmp, $file)) { @unlink($tmp); fail(500, 'could not save the cover'); }
+        if (@file_put_contents($tmp, $bytes) !== strlen($bytes) || !@rename($tmp, $file)) { @unlink($tmp); throw new MbError('could not save the cover', 500); }
     }
     return $name;
 }
@@ -794,18 +821,19 @@ function mbGet(PDO $db, array $secrets, string $path, array $q): array {
     if ($lock) flock($lock, LOCK_EX);
     try {
         $last = (float)(metaGet($db, 'mb_last') ?? 0);
-        $wait = $last + 1.1 - microtime(true);
+        $gap = (float)(getenv('SCRAY_AUDIO_MB_GAP') ?: 1.1);          // their rule: about one a second (tests shorten it)
+        $wait = $last + $gap - microtime(true);
         if ($wait > 0) usleep((int)($wait * 1e6));
         [$code, $body] = httpGet($url, mbUserAgent($secrets), 'application/json');
         metaSet($db, 'mb_last', (string)microtime(true));
     } finally {
         if ($lock) { flock($lock, LOCK_UN); fclose($lock); }
     }
-    if ($code === 503) fail(503, 'MusicBrainz is busy - try again in a few seconds');
-    if ($code === 404) fail(404, 'MusicBrainz doesn’t know that one');
-    if ($code !== 200) fail(502, $code ? "MusicBrainz answered $code" : 'couldn’t reach MusicBrainz');
+    if ($code === 503) throw new MbError('MusicBrainz is busy - try again in a few seconds', 503);
+    if ($code === 404) throw new MbError('MusicBrainz doesn’t know that one', 404);
+    if ($code !== 200) throw new MbError($code ? "MusicBrainz answered $code" : 'couldn’t reach MusicBrainz', 502);
     $j = json_decode($body, true);
-    if (!is_array($j)) fail(502, 'MusicBrainz sent something unreadable');
+    if (!is_array($j)) throw new MbError('MusicBrainz sent something unreadable', 502);
     run($db, 'INSERT INTO mb_cache(url, body, fetched_at) VALUES (:u, :b, :t) ON CONFLICT(url) DO UPDATE SET body = excluded.body, fetched_at = excluded.fetched_at',
         [':u' => $url, ':b' => $body, ':t' => time()]);
     return $j;
@@ -817,6 +845,281 @@ function mbCredit($credits): string {
 }
 function mbLucene(string $s): string {
     return '"' . str_replace(['\\', '"'], ['\\\\', '\\"'], trim($s)) . '"';
+}
+
+/** A release, read for matching: tracks with their credits (collaborators) and remixers, genres, years, cover. */
+function mbReleaseInfo(PDO $db, array $secrets, string $rid): array {
+    $r = mbGet($db, $secrets, "release/$rid", ['inc' => 'recordings+artist-credits+genres+release-groups+recording-level-rels+artist-rels']);
+    $genres = [];
+    foreach (array_merge((array)($r['genres'] ?? []), (array)($r['release-group']['genres'] ?? [])) as $g) {
+        $nm = (string)($g['name'] ?? ''); if ($nm !== '') $genres[$nm] = max($genres[$nm] ?? 0, (int)($g['count'] ?? 0));
+    }
+    arsort($genres);
+    $media = [];
+    foreach ((array)($r['media'] ?? []) as $m) {
+        $tr = [];
+        foreach ((array)($m['tracks'] ?? []) as $t) {
+            $title = (string)($t['title'] ?? ($t['recording']['title'] ?? ''));
+            $artist = mbCredit($t['artist-credit'] ?? ($t['recording']['artist-credit'] ?? []));
+            // Remixers are a relationship on the recording; MusicBrainz usually names them in the title already.
+            $remix = [];
+            foreach ((array)($t['recording']['relations'] ?? []) as $rel) {
+                if (($rel['type'] ?? '') === 'remixer' && !empty($rel['artist']['name'])) $remix[] = (string)$rel['artist']['name'];
+            }
+            $remix = array_values(array_unique($remix));
+            $full = $title;
+            $named = array_filter($remix, static fn($n) => !str_contains(foldText($title . ' ' . $artist), foldText($n)));
+            if ($named) $full .= ' (' . implode(' & ', $named) . (preg_match('/\bremix\b/i', $title) ? '' : ' Remix') . ')';
+            $tr[] = ['no' => (int)($t['position'] ?? 0), 'title' => $full, 'artist' => $artist, 'remixers' => $remix,
+                     'ms' => isset($t['length']) ? (int)$t['length'] : (isset($t['recording']['length']) ? (int)$t['recording']['length'] : null),
+                     'recording' => (string)($t['recording']['id'] ?? '')];
+        }
+        $media[] = ['disc' => (int)($m['position'] ?? count($media) + 1), 'format' => (string)($m['format'] ?? ''), 'tracks' => $tr];
+    }
+    $date = (string)($r['date'] ?? ($r['release-group']['first-release-date'] ?? ''));
+    $front = !empty($r['cover-art-archive']['front']);
+    return [
+        'id' => (string)$r['id'], 'title' => (string)($r['title'] ?? ''), 'artist' => mbCredit($r['artist-credit'] ?? []),
+        'date' => $date, 'year' => preg_match('/^(\d{4})/', $date, $mm) ? (int)$mm[1] : null,
+        'firstYear' => preg_match('/^(\d{4})/', (string)($r['release-group']['first-release-date'] ?? ''), $m2) ? (int)$m2[1] : null,
+        'group' => (string)($r['release-group']['id'] ?? ''),
+        'genres' => array_slice(array_keys($genres), 0, 5), 'cover' => $front,
+        'coverThumb' => $front ? AUDIO_CAA_BASE . "/release/$rid/front-250" : null,
+        'media' => $media,
+    ];
+}
+
+/** The front cover from the Cover Art Archive ("release/<id>" or "release-group/<id>"), stored. null when there is none. */
+function caaCover(array $secrets, string $what): ?string {
+    [$code, $body] = httpGet(AUDIO_CAA_BASE . "/$what/front-1200", mbUserAgent($secrets), 'image/*', 40);
+    if ($code === 404) return null;
+    if ($code !== 200 || $body === '') throw new MbError($code ? "the Cover Art Archive answered $code" : 'couldn’t reach the Cover Art Archive', 502);
+    return storeCover($body);
+}
+
+// ---- the bulk MusicBrainz matcher (bulk-mb.php) ---------------------------------
+// One album (= an album tag in one folder) at a time. Search; keep releases whose title is the album's and whose track
+// count is ours; pick the oldest (the original) or the best match; check the track lengths; apply everything. Albums
+// where that isn't clear (different artists, wrong lengths, nothing with our track count, nothing at all) wait for you.
+const MB_LEN_SLACK_MS = 10000;
+const MB_WORKING_STALE = 600;
+
+/** "Album A (2011 Remaster) [Deluxe]" and "album a" compare equal. */
+function mbNormTitle(string $s): string {
+    $s = foldText($s);
+    $s = preg_replace('/[\(\[][^\)\]]*(remaster|deluxe|edition|expanded|anniversary|bonus|version|reissue|mono|stereo|explicit|clean)[^\)\]]*[\)\]]/u', ' ', $s) ?? $s;
+    $s = preg_replace('/\s+-\s+.*(remaster|edition|version).*$/u', ' ', $s) ?? $s;
+    $s = str_replace('&', ' and ', $s);
+    $s = preg_replace('/[^\p{L}\p{N}]+/u', ' ', $s) ?? $s;
+    return trim($s);
+}
+/** A real album artist to search with ("Various Artists" and stand-ins don't help). */
+function mbUsefulArtist(string $a): string {
+    $f = foldText(trim($a));
+    return ($f === '' || in_array($f, ['unknown artist', 'various artists', 'various', 'va'], true)) ? '' : trim($a);
+}
+function mbDateKey(string $d): string { return $d === '' ? '9999' : str_pad($d, 10, '-'); }
+
+/** Pair our tracks (in album order) with a release's: same count by order, else by disc + number, else by order. */
+function mbPairsPhp(array $ours, array $rel): array {
+    $theirs = [];
+    foreach ($rel['media'] as $m) foreach ($m['tracks'] as $t) $theirs[] = $t + ['disc' => $m['disc']];
+    if (count($ours) === count($theirs)) return array_map(null, $ours, $theirs);
+    $numbered = array_reduce($ours, static fn($c, $t) => $c && $t['track_no'] !== null, true);
+    $out = [];
+    foreach ($ours as $i => $t) {
+        $m = null;
+        if ($numbered) { foreach ($theirs as $x) if ($x['no'] === (int)$t['track_no'] && $x['disc'] === ((int)$t['disc_no'] ?: 1)) { $m = $x; break; } }
+        else $m = $theirs[$i] ?? null;
+        $out[] = [$t, $m];
+    }
+    return $out;
+}
+
+/** Do the lengths agree? [ok, note]. With too few lengths to compare it trusts the title and count. */
+function mbLengthsOk(array $pairs): array {
+    $n = 0; $good = 0;
+    foreach ($pairs as [$t, $m]) {
+        if (!$m || empty($m['ms']) || empty($t['duration_ms'])) continue;
+        $n++;
+        if (abs((int)$m['ms'] - (int)$t['duration_ms']) <= MB_LEN_SLACK_MS) $good++;
+    }
+    if ($n < max(1, intdiv(count($pairs), 2))) return [true, 'too few lengths to compare'];
+    return [$good >= 0.8 * $n, "$good of $n lengths agree"];
+}
+
+/** Put a release on these tracks: everything (titles, credits, numbers, album, album artist, year, genre, cover). */
+function mbApply(PDO $db, array $secrets, array $tracks, array $rel, string $mode): array {
+    $tracks = sortTracks($tracks);
+    $pairs = mbPairsPhp($tracks, $rel);
+    $multi = count($rel['media']) > 1;
+    $year = $mode === 'best' ? ($rel['year'] ?? $rel['firstYear']) : ($rel['firstYear'] ?? $rel['year']);
+    $genre = $rel['genres'] ? mb_convert_case((string)$rel['genres'][0], MB_CASE_TITLE, 'UTF-8') : null;
+    $cover = null;
+    try {
+        $cover = $rel['cover'] ? caaCover($secrets, 'release/' . $rel['id']) : null;
+        if ($cover === null && $rel['group'] !== '') $cover = caaCover($secrets, 'release-group/' . $rel['group']);
+    } catch (MbError $e) { $cover = null; }                       // details still go on; the page says there is no cover
+    $db->beginTransaction();
+    $ids = [];
+    foreach ($pairs as [$t, $m]) {
+        if (!$m) continue;
+        $set = ['title' => $m['title'], 'track_no' => (string)$m['no'], 'disc_no' => $multi ? (string)$m['disc'] : '',
+                'album' => $rel['title'], 'album_artist' => $rel['artist'], 'mb_release' => $rel['id'], 'mb_recording' => $m['recording'] ?: null];
+        if ($m['artist'] !== '') $set['artist'] = $m['artist'];
+        if ($year) $set['year'] = (string)$year;
+        if ($genre) $set['genre'] = $genre;
+        if ($cover) $set['cover'] = $cover;
+        trackEdit($db, (int)$t['id'], $set, 'musicbrainz');
+        $ids[] = (int)$t['id'];
+    }
+    trackApply($db, $ids);
+    $db->commit();
+    return ['ids' => $ids, 'cover' => $cover !== null, 'year' => $year];
+}
+
+/** Candidates for one album, as the page shows them. */
+function mbCandidates(array $releases): array {
+    return array_map(static fn($r) => [
+        'id' => (string)$r['id'], 'title' => (string)($r['title'] ?? ''), 'artist' => mbCredit($r['artist-credit'] ?? []),
+        'date' => (string)($r['date'] ?? ''), 'country' => (string)($r['country'] ?? ''), 'tracks' => (int)($r['track-count'] ?? 0),
+        'score' => (int)($r['score'] ?? 0), 'type' => (string)($r['release-group']['primary-type'] ?? ''), 'note' => (string)($r['disambiguation'] ?? ''),
+    ], array_slice($releases, 0, 8));
+}
+
+/** Decide one album. ['state' => matched|review|none, 'reason', 'release' (info), 'candidates']. */
+function mbDecide(PDO $db, array $secrets, array $tracks, string $album, string $artist, string $mode): array {
+    $n = count($tracks);
+    $want = mbNormTitle($album);
+    $queries = [];
+    if ($artist !== '') $queries[] = 'release:' . mbLucene($album) . ' AND artist:' . mbLucene($artist);
+    $queries[] = 'release:' . mbLucene($album) . " AND tracks:$n";
+    $all = []; $fit = [];
+    foreach ($queries as $q) {
+        $j = mbGet($db, $secrets, 'release', ['query' => $q, 'limit' => 25]);
+        $rels = (array)($j['releases'] ?? []);
+        $all = $all ?: $rels;
+        $titled = array_values(array_filter($rels, static fn($r) => (int)($r['score'] ?? 0) >= 60 && mbNormTitle((string)($r['title'] ?? '')) === $want));
+        $fit = array_values(array_filter($titled, static fn($r) => (int)($r['track-count'] ?? 0) === $n));
+        if ($fit) break;
+        if ($titled && !$fit) $all = $titled;
+    }
+    if (!$fit) {
+        $near = array_values(array_filter($all, static fn($r) => mbNormTitle((string)($r['title'] ?? '')) === $want));
+        if ($near) {
+            $counts = implode(' / ', array_unique(array_map(static fn($r) => (int)($r['track-count'] ?? 0), $near)));
+            return ['state' => 'review', 'reason' => "found “{$album}” but with $counts tracks - you have $n", 'candidates' => mbCandidates($near)];
+        }
+        return ['state' => $all ? 'review' : 'none', 'reason' => $all ? 'nothing with that exact title - closest results below' : 'nothing found on MusicBrainz',
+                'candidates' => mbCandidates($all)];
+    }
+    // the same title by different artists, and nothing of ours to tell them apart: yours to choose
+    $byGroup = [];
+    foreach ($fit as $r) $byGroup[(string)($r['release-group']['id'] ?? $r['id'])][] = $r;
+    $credits = array_unique(array_map(static fn($g) => foldText(mbCredit($g[0]['artist-credit'] ?? [])), $byGroup));
+    if (count($credits) > 1) {
+        $ours = foldText($artist);
+        $mine = $ours === '' ? [] : array_filter($byGroup, static fn($g) => foldText(mbCredit($g[0]['artist-credit'] ?? [])) === $ours);
+        if (count($mine) >= 1) $byGroup = $mine;
+        else return ['state' => 'review', 'reason' => 'several albums called “' . $album . '” by different artists', 'candidates' => mbCandidates($fit)];
+    }
+    // order the releases: the original first (oldest), or the closest match first (best)
+    $order = array_merge(...array_values($byGroup));
+    usort($order, $mode === 'best'
+        ? static fn($a, $b) => ((int)($b['score'] ?? 0) <=> (int)($a['score'] ?? 0)) ?: strcmp(mbDateKey((string)($a['date'] ?? '')), mbDateKey((string)($b['date'] ?? '')))
+        : static fn($a, $b) => strcmp(mbDateKey((string)($a['date'] ?? '')), mbDateKey((string)($b['date'] ?? '')))
+                               ?: ((($b['status'] ?? '') === 'Official') <=> (($a['status'] ?? '') === 'Official'))
+                               ?: ((int)($b['score'] ?? 0) <=> (int)($a['score'] ?? 0)));
+    $sorted = sortTracks($tracks);
+    $notes = [];
+    foreach (array_slice($order, 0, 3) as $r) {
+        $rel = mbReleaseInfo($db, $secrets, (string)$r['id']);
+        [$ok, $note] = mbLengthsOk(mbPairsPhp($sorted, $rel));
+        if ($ok) return ['state' => 'matched', 'reason' => $note, 'release' => $rel, 'candidates' => mbCandidates($fit)];
+        $notes[] = $note;
+    }
+    return ['state' => 'review', 'reason' => 'the track lengths don’t match (' . implode('; ', $notes) . ')', 'candidates' => mbCandidates($fit)];
+}
+
+function mbRun(PDO $db): ?array {
+    $r = run($db, 'SELECT * FROM mb_runs ORDER BY id DESC LIMIT 1')->fetch();
+    if (!$r) return null;
+    $r['opts'] = json_decode((string)$r['opts'], true) ?: [];
+    return $r;
+}
+
+/** Take the next album of the running bulk run and settle it. Returns what happened (or idle / paused). */
+function mbBulkStep(PDO $db, array $secrets, string $by): array {
+    $run = mbRun($db);
+    if (!$run || $run['state'] !== 'running') return ['idle' => true, 'state' => $run['state'] ?? 'none'];
+    run($db, "UPDATE mb_bulk SET state = 'pending' WHERE state = 'working' AND started_at < :t", [':t' => gmdate('c', time() - MB_WORKING_STALE)]);
+    $next = run($db, "SELECT id FROM mb_bulk WHERE state = 'pending' AND run_id = :r ORDER BY id LIMIT 1", [':r' => (int)$run['id']])->fetchColumn();
+    if ($next === false) {
+        if (!(int)run($db, "SELECT COUNT(*) FROM mb_bulk WHERE state = 'working' AND run_id = :r", [':r' => (int)$run['id']])->fetchColumn()) {
+            run($db, "UPDATE mb_runs SET state = 'done', finished_at = :n WHERE id = :i AND state = 'running'", [':n' => gmdate('c'), ':i' => (int)$run['id']]);
+        }
+        return ['idle' => true, 'state' => 'done'];
+    }
+    $now = gmdate('c');
+    if (!run($db, "UPDATE mb_bulk SET state = 'working', started_at = :n WHERE id = :i AND state = 'pending'", [':n' => $now, ':i' => (int)$next])->rowCount()) {
+        return ['idle' => false, 'raced' => true];                // someone else (the gateway, a tab) took it
+    }
+    run($db, 'UPDATE mb_runs SET last_step_at = :n, last_step_by = :b WHERE id = :i', [':n' => $now, ':b' => $by, ':i' => (int)$run['id']]);
+    $row = run($db, 'SELECT * FROM mb_bulk WHERE id = :i', [':i' => (int)$next])->fetch();
+    $ids = json_decode((string)$row['track_ids'], true) ?: [];
+    $in = implode(',', array_fill(0, max(1, count($ids)), '?'));
+    $tracks = $ids ? run($db, "SELECT id, track_no, disc_no, filename, duration_ms FROM tracks WHERE deleted = 0 AND id IN ($in)", $ids)->fetchAll() : [];
+    $save = static function (array $f) use ($db, $row): void {
+        $f += ['reason' => null, 'release_id' => null, 'release_title' => null, 'release_artist' => null, 'release_year' => null, 'candidates' => null, 'cover' => null];
+        run($db, 'UPDATE mb_bulk SET state = :s, reason = :r, release_id = :ri, release_title = :rt, release_artist = :ra, release_year = :ry,
+                    candidates = :c, has_cover = :cv, updated_at = :u WHERE id = :i',
+            [':s' => $f['state'], ':r' => $f['reason'], ':ri' => $f['release_id'], ':rt' => $f['release_title'], ':ra' => $f['release_artist'],
+             ':ry' => $f['release_year'], ':c' => $f['candidates'] === null ? null : json_encode($f['candidates'], JSON_UNESCAPED_UNICODE),
+             ':cv' => $f['cover'] === null ? null : (int)$f['cover'], ':u' => gmdate('c'), ':i' => (int)$row['id']]);
+    };
+    if (!$tracks) { $save(['state' => 'error', 'reason' => 'its tracks are no longer in the library']); return ['idle' => false, 'id' => (int)$row['id'], 'state' => 'error']; }
+    try {
+        $d = mbDecide($db, $secrets, $tracks, (string)$row['album'], (string)$row['artist'], (string)($run['opts']['mode'] ?? 'oldest'));
+        if ($d['state'] === 'matched') {
+            $a = mbApply($db, $secrets, $tracks, $d['release'], (string)($run['opts']['mode'] ?? 'oldest'));
+            if (!empty($run['opts']['write'])) mbQueueWrite($db, $a['ids']);
+            $rel = $d['release'];
+            $save(['state' => 'matched', 'reason' => $d['reason'], 'release_id' => $rel['id'], 'release_title' => $rel['title'], 'release_artist' => $rel['artist'],
+                   'release_year' => $a['year'], 'candidates' => $d['candidates'], 'cover' => $a['cover']]);
+            mbRowFollows($db, (int)$row['id'], $rel['title']);
+        } else {
+            $save(['state' => $d['state'], 'reason' => $d['reason'], 'candidates' => $d['candidates']]);
+        }
+        return ['idle' => false, 'id' => (int)$row['id'], 'state' => $d['state']];
+    } catch (MbError $e) {
+        if ($db->inTransaction()) $db->rollBack();
+        if ($e->getCode() === 503) {                                 // MusicBrainz asked us to slow down: try this one again later
+            run($db, "UPDATE mb_bulk SET state = 'pending' WHERE id = :i", [':i' => (int)$row['id']]);
+            return ['idle' => false, 'busy' => true];
+        }
+        $save(['state' => 'error', 'reason' => $e->getMessage()]);
+        return ['idle' => false, 'id' => (int)$row['id'], 'state' => 'error'];
+    }
+}
+
+/** The album is called what MusicBrainz says now; the row follows, so the next run finds it (unless that name is taken). */
+function mbRowFollows(PDO $db, int $id, string $album): void {
+    try { run($db, 'UPDATE OR IGNORE mb_bulk SET album = :a WHERE id = :i', [':a' => $album, ':i' => $id]); } catch (Throwable $e) { /* keep the old name */ }
+}
+
+/** Queue these tracks to be written into the files (as "Write to files" does). */
+function mbQueueWrite(PDO $db, array $ids): int {
+    $n = 0;
+    $ins = $db->prepare("INSERT INTO push_jobs(track_id, path, etag, kind, changes, cover, before, state, requested_at)
+                         VALUES (:t, :p, :e, 'write', :c, :cv, :b, 'queued', :n)");
+    foreach (pushState($db, $ids) as $id => $t) {
+        if ((!$t['changes'] && !$t['cover']) || !$t['writable']) continue;
+        if ($t['job'] && in_array($t['job']['state'], ['queued', 'working'], true)) continue;
+        $ins->execute([':t' => $id, ':p' => $t['path'], ':e' => $t['etag'], ':c' => json_encode($t['changes'], JSON_UNESCAPED_UNICODE),
+                       ':cv' => $t['cover'], ':b' => json_encode(['file' => $t['file'], 'edits' => $t['edits']], JSON_UNESCAPED_UNICODE), ':n' => gmdate('c')]);
+        $n++;
+    }
+    return $n;
 }
 
 // ---- scan status -------------------------------------------------------
@@ -1169,6 +1472,149 @@ case 'push_undo': {
     jsonOut(['ok' => true, 'queued' => $n, 'gateway' => pushGateway($db)]);
 }
 
+// ---- the bulk MusicBrainz matcher (bulk-mb.php) ---------------------------------
+case 'mb_bulk_start': {
+    if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') fail(405, 'POST only');
+    $cur = mbRun($db);
+    if ($cur && $cur['state'] === 'running') fail(409, 'a run is going - pause or stop it first');
+    $opts = ['mode' => ($in['mode'] ?? '') === 'best' ? 'best' : 'oldest', 'write' => !empty($in['write']),
+             'retry' => !empty($in['retry']), 'redo' => !empty($in['redo'])];
+    $now = gmdate('c');
+    $db->beginTransaction();
+    run($db, "INSERT INTO mb_runs(mode, opts, state, total, started_at) VALUES (:m, :o, 'running', 0, :n)",
+        [':m' => $opts['mode'], ':o' => json_encode($opts), ':n' => $now]);
+    $rid = (int)$db->lastInsertId();
+    $have = [];
+    foreach (run($db, 'SELECT id, folder, album, state FROM mb_bulk')->fetchAll() as $r) $have[$r['folder'] . "\0" . $r['album']] = $r;
+    $ins = $db->prepare("INSERT INTO mb_bulk(folder, album, artist, track_ids, tracks, run_id, state, reason, updated_at) VALUES (:f, :a, :ar, :t, :n, :r, :s, :why, :u)");
+    $up = $db->prepare('UPDATE mb_bulk SET artist = :ar, track_ids = :t, tracks = :n, run_id = :r, state = :s, reason = NULL, updated_at = :u WHERE id = :i');
+    $queued = 0;
+    $albums = run($db, "SELECT folder, album, GROUP_CONCAT(id) ids, COUNT(*) n, COUNT(DISTINCT album_artist) nart, MIN(album_artist) aa,
+                               SUM(mb_release IS NOT NULL) done FROM tracks WHERE deleted = 0 AND album <> '' GROUP BY folder, album")->fetchAll();
+    foreach ($albums as $a) {
+        $ids = array_map('intval', explode(',', (string)$a['ids']));
+        $artist = (int)$a['nart'] === 1 ? mbUsefulArtist((string)$a['aa']) : '';
+        $old = $have[$a['folder'] . "\0" . $a['album']] ?? null;
+        $already = (int)$a['done'] === (int)$a['n'];
+        $go = $old === null ? (!$already || $opts['redo'])
+            : (in_array($old['state'], ['pending', 'working'], true)
+               || ($opts['retry'] && in_array($old['state'], ['review', 'none', 'error'], true))
+               || ($opts['redo'] && in_array($old['state'], ['matched', 'undone'], true)));
+        if ($old === null) {
+            $ins->execute([':f' => $a['folder'], ':a' => $a['album'], ':ar' => $artist, ':t' => json_encode($ids), ':n' => count($ids), ':r' => $rid,
+                           ':s' => $go ? 'pending' : 'matched', ':why' => $go ? null : 'matched before', ':u' => $now]);
+        } elseif ($go) {
+            $up->execute([':ar' => $artist, ':t' => json_encode($ids), ':n' => count($ids), ':r' => $rid, ':s' => 'pending', ':u' => $now, ':i' => (int)$old['id']]);
+        }
+        if ($go) $queued++;
+    }
+    run($db, 'UPDATE mb_runs SET total = :t WHERE id = :i', [':t' => $queued, ':i' => $rid]);
+    if (!$queued) run($db, "UPDATE mb_runs SET state = 'done', finished_at = :n WHERE id = :i", [':n' => $now, ':i' => $rid]);
+    $db->commit();
+    jsonOut(['ok' => true, 'run' => $rid, 'queued' => $queued]);
+}
+
+case 'mb_bulk_control': {
+    if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') fail(405, 'POST only');
+    $do = (string)($in['do'] ?? '');
+    $r = mbRun($db);
+    if (!$r) fail(404, 'no run yet');
+    $to = ['pause' => ['running', 'paused'], 'resume' => ['paused', 'running'], 'stop' => [null, 'stopped']][$do] ?? null;
+    if ($to === null) fail(400, 'do: pause, resume or stop');
+    if ($to[0] !== null && $r['state'] !== $to[0]) fail(409, "the run is {$r['state']}");
+    run($db, 'UPDATE mb_runs SET state = :s, finished_at = CASE WHEN :s2 = \'stopped\' THEN :n ELSE finished_at END WHERE id = :i',
+        [':s' => $to[1], ':s2' => $to[1], ':n' => gmdate('c'), ':i' => (int)$r['id']]);
+    jsonOut(['ok' => true, 'state' => $to[1]]);
+}
+
+case 'mb_bulk_status': {
+    $r = mbRun($db);
+    $counts = [];
+    foreach (run($db, 'SELECT state, COUNT(*) n FROM mb_bulk GROUP BY state')->fetchAll() as $c) $counts[$c['state']] = (int)$c['n'];
+    $runCounts = [];
+    $rate = 0.0; $eta = null; $current = null;
+    if ($r) {
+        foreach (run($db, 'SELECT state, COUNT(*) n FROM mb_bulk WHERE run_id = :r GROUP BY state', [':r' => (int)$r['id']])->fetchAll() as $c) $runCounts[$c['state']] = (int)$c['n'];
+        $recent = (int)run($db, "SELECT COUNT(*) FROM mb_bulk WHERE run_id = :r AND state NOT IN ('pending', 'working') AND updated_at > :t",
+            [':r' => (int)$r['id'], ':t' => gmdate('c', time() - 600)])->fetchColumn();
+        $rate = $recent / 10;                                         // albums a minute, over the last 10 minutes
+        $left = ($runCounts['pending'] ?? 0) + ($runCounts['working'] ?? 0);
+        $eta = $rate > 0 ? (int)round($left / $rate * 60) : null;
+        $current = run($db, "SELECT folder, album, started_at FROM mb_bulk WHERE state = 'working' ORDER BY started_at DESC LIMIT 1")->fetch() ?: null;
+        unset($r['opts_raw']);
+    }
+    $stepAge = $r ? secsSince($r['last_step_at'] ?? null) : null;
+    jsonOut(['ok' => true, 'run' => $r, 'counts' => (object)$counts, 'run_counts' => (object)$runCounts, 'rate' => round($rate, 2), 'eta' => $eta,
+             'current' => $current, 'step_age' => $stepAge, 'gateway' => pushGateway($db),
+             'no_album' => (int)run($db, "SELECT COUNT(*) FROM tracks WHERE deleted = 0 AND album = ''")->fetchColumn()]);
+}
+
+case 'mb_bulk_list': {
+    $state = (string)($_GET['state'] ?? 'all');
+    $w = []; $p = [];
+    if ($state !== 'all') { $w[] = 'state = :s'; $p[':s'] = $state; }
+    $q = trim((string)($_GET['q'] ?? ''));
+    if ($q !== '') { $w[] = "(folder || ' ' || album || ' ' || artist || ' ' || COALESCE(release_title, '') || ' ' || COALESCE(release_artist, '')) LIKE :q ESCAPE '\\'"; $p[':q'] = '%' . likeEsc($q) . '%'; }
+    $where = $w ? 'WHERE ' . implode(' AND ', $w) : '';
+    $off = max(0, (int)($_GET['offset'] ?? 0));
+    $order = $state === 'pending' ? 'id' : "CASE WHEN state = 'working' THEN 0 ELSE 1 END, COALESCE(updated_at, '') DESC, id";
+    $rows = run($db, "SELECT id, folder, album, artist, tracks, state, reason, release_id, release_title, release_artist, release_year, has_cover, candidates, updated_at
+                        FROM mb_bulk $where ORDER BY $order LIMIT 200 OFFSET :o", $p + [':o' => $off])->fetchAll();
+    $total = (int)run($db, "SELECT COUNT(*) FROM mb_bulk $where", $p)->fetchColumn();
+    foreach ($rows as &$row) { $row['candidates'] = json_decode((string)($row['candidates'] ?? 'null'), true); $row['id'] = (int)$row['id']; }
+    jsonOut(['ok' => true, 'rows' => $rows, 'total' => $total]);
+}
+
+// You pick the release for an album the matcher set aside (or replace a match).
+case 'mb_bulk_pick': {
+    if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') fail(405, 'POST only');
+    $row = run($db, 'SELECT * FROM mb_bulk WHERE id = :i', [':i' => (int)($in['id'] ?? 0)])->fetch();
+    $rid = (string)($in['release'] ?? '');
+    if (!$row || !preg_match('/^[0-9a-f-]{36}$/', $rid)) fail(400, 'id and a release id needed');
+    $ids = json_decode((string)$row['track_ids'], true) ?: [];
+    $in2 = implode(',', array_fill(0, max(1, count($ids)), '?'));
+    $tracks = $ids ? run($db, "SELECT id, track_no, disc_no, filename, duration_ms FROM tracks WHERE deleted = 0 AND id IN ($in2)", $ids)->fetchAll() : [];
+    if (!$tracks) fail(404, 'its tracks are no longer in the library');
+    $rel = mbReleaseInfo($db, $secrets, $rid);
+    $run = mbRun($db);
+    $a = mbApply($db, $secrets, $tracks, $rel, (string)($run['opts']['mode'] ?? 'oldest'));
+    if (!empty($in['write'])) mbQueueWrite($db, $a['ids']);
+    run($db, "UPDATE mb_bulk SET state = 'matched', reason = 'picked by you', release_id = :ri, release_title = :rt, release_artist = :ra, release_year = :ry,
+                has_cover = :cv, updated_at = :u WHERE id = :i",
+        [':ri' => $rel['id'], ':rt' => $rel['title'], ':ra' => $rel['artist'], ':ry' => $a['year'], ':cv' => (int)$a['cover'], ':u' => gmdate('c'), ':i' => (int)$row['id']]);
+    mbRowFollows($db, (int)$row['id'], $rel['title']);
+    jsonOut(['ok' => true, 'tracks' => count($a['ids']), 'cover' => $a['cover']]);
+}
+
+case 'mb_bulk_skip':
+case 'mb_bulk_retry':
+case 'mb_bulk_undo': {
+    if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') fail(405, 'POST only');
+    $row = run($db, 'SELECT * FROM mb_bulk WHERE id = :i', [':i' => (int)($in['id'] ?? 0)])->fetch();
+    if (!$row) fail(404, 'no such album');
+    if ($action === 'mb_bulk_undo') {
+        // take off what MusicBrainz put on (your own edits stay)
+        $ids = json_decode((string)$row['track_ids'], true) ?: [];
+        $db->beginTransaction();
+        foreach ($ids as $t) run($db, "DELETE FROM track_edits WHERE track_id = :t AND source = 'musicbrainz'", [':t' => (int)$t]);
+        trackApply($db, $ids);
+        $db->commit();
+        $state = 'undone';
+    } else {
+        $state = $action === 'mb_bulk_skip' ? 'skipped' : 'pending';
+    }
+    $run = mbRun($db);
+    run($db, 'UPDATE mb_bulk SET state = :s, run_id = COALESCE(:r, run_id), updated_at = :u WHERE id = :i',
+        [':s' => $state, ':r' => $state === 'pending' && $run ? (int)$run['id'] : null, ':u' => gmdate('c'), ':i' => (int)$row['id']]);
+    jsonOut(['ok' => true, 'state' => $state]);
+}
+
+// The page takes a step itself when the gateway hasn't for a while (so a run still moves before the gateway is updated).
+case 'mb_bulk_step': {
+    if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') fail(405, 'POST only');
+    jsonOut(['ok' => true] + mbBulkStep($db, $secrets, 'page'));
+}
+
 // ---- MusicBrainz: find the release, then read it -----------------------------
 case 'mb_search': {
     $artist = trim((string)($_GET['artist'] ?? '')); $album = trim((string)($_GET['album'] ?? '')); $q = trim((string)($_GET['q'] ?? ''));
@@ -1193,32 +1639,7 @@ case 'mb_search': {
 case 'mb_release': {
     $rid = (string)($_GET['id'] ?? '');
     if (!preg_match('/^[0-9a-f-]{36}$/', $rid)) fail(400, 'a MusicBrainz release id is needed');
-    $r = mbGet($db, $secrets, "release/$rid", ['inc' => 'recordings+artist-credits+genres+release-groups']);
-    $genres = [];
-    foreach (array_merge((array)($r['genres'] ?? []), (array)($r['release-group']['genres'] ?? [])) as $g) {
-        $nm = (string)($g['name'] ?? ''); if ($nm !== '') $genres[$nm] = max($genres[$nm] ?? 0, (int)($g['count'] ?? 0));
-    }
-    arsort($genres);
-    $media = [];
-    foreach ((array)($r['media'] ?? []) as $m) {
-        $tr = [];
-        foreach ((array)($m['tracks'] ?? []) as $t) {
-            $tr[] = ['no' => (int)($t['position'] ?? 0), 'title' => (string)($t['title'] ?? ($t['recording']['title'] ?? '')),
-                     'artist' => mbCredit($t['artist-credit'] ?? ($t['recording']['artist-credit'] ?? [])),
-                     'ms' => isset($t['length']) ? (int)$t['length'] : (isset($t['recording']['length']) ? (int)$t['recording']['length'] : null),
-                     'recording' => (string)($t['recording']['id'] ?? '')];
-        }
-        $media[] = ['disc' => (int)($m['position'] ?? count($media) + 1), 'format' => (string)($m['format'] ?? ''), 'tracks' => $tr];
-    }
-    $date = (string)($r['date'] ?? ($r['release-group']['first-release-date'] ?? ''));
-    jsonOut(['ok' => true, 'release' => [
-        'id' => (string)$r['id'], 'title' => (string)($r['title'] ?? ''), 'artist' => mbCredit($r['artist-credit'] ?? []),
-        'date' => $date, 'year' => preg_match('/^(\d{4})/', $date, $mm) ? (int)$mm[1] : null,
-        'firstYear' => preg_match('/^(\d{4})/', (string)($r['release-group']['first-release-date'] ?? ''), $m2) ? (int)$m2[1] : null,
-        'genres' => array_slice(array_keys($genres), 0, 5), 'cover' => !empty($r['cover-art-archive']['front']),
-        'coverThumb' => !empty($r['cover-art-archive']['front']) ? AUDIO_CAA_BASE . "/release/$rid/front-250" : null,
-        'media' => $media,
-    ]]);
+    jsonOut(['ok' => true, 'release' => mbReleaseInfo($db, $secrets, $rid)]);
 }
 
 // ---- covers you choose: from the Cover Art Archive, or a picture you upload ----
@@ -1227,10 +1648,8 @@ case 'cover_mb': {
     $ids = plIds($in['track_ids'] ?? null, 'track_ids');
     $rid = (string)($in['release'] ?? '');
     if (!$ids || !preg_match('/^[0-9a-f-]{36}$/', $rid)) fail(400, 'track_ids and a release id needed');
-    [$code, $body] = httpGet(AUDIO_CAA_BASE . "/release/$rid/front-1200", mbUserAgent($secrets), 'image/*', 40);
-    if ($code === 404) fail(404, 'the Cover Art Archive has no front cover for that release');
-    if ($code !== 200 || $body === '') fail(502, $code ? "the Cover Art Archive answered $code" : 'couldn’t reach the Cover Art Archive');
-    $name = storeCover($body);
+    $name = caaCover($secrets, "release/$rid");
+    if ($name === null) fail(404, 'the Cover Art Archive has no front cover for that release');
     $db->beginTransaction();
     foreach ($ids as $id) trackEdit($db, $id, ['cover' => $name], 'musicbrainz');
     trackApply($db, $ids);
@@ -1399,8 +1818,14 @@ case 'audio_worker_poll': {
         metaSet($db, 'scan_claimed_at', gmdate('c'));
     }
     pushUnstick($db);
-    jsonOut(['ok' => true, 'requested' => $want, 'push' => (int)run($db, "SELECT COUNT(*) FROM push_jobs WHERE state = 'queued'")->fetchColumn()]);
+    $mbr = mbRun($db);
+    jsonOut(['ok' => true, 'requested' => $want, 'push' => (int)run($db, "SELECT COUNT(*) FROM push_jobs WHERE state = 'queued'")->fetchColumn(),
+             'mb' => $mbr !== null && $mbr['state'] === 'running']);
 }
+
+// The gateway works through the bulk MusicBrainz run, one album per call, for as long as it has time.
+case 'audio_worker_mb_step':
+    jsonOut(['ok' => true] + mbBulkStep($db, $secrets, 'gateway'));
 
 // The gateway takes the next few files to write. Each comes with a link to the cover to put in, if any.
 case 'audio_worker_push_next': {
@@ -1581,5 +2006,5 @@ default:
 }
 } catch (Throwable $e) {
     if ($db->inTransaction()) $db->rollBack();
-    fail(500, $e->getMessage());
+    fail($e instanceof MbError ? ($e->getCode() ?: 502) : 500, $e->getMessage());
 }
