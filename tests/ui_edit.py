@@ -94,6 +94,30 @@ try:
             chk("applied: titles, album and cover", pg.evaluate(titles) == ["First Light", "Second Wind"] and "Album A (Remastered)" in pg.inner_text("h1.title"), pg.evaluate(titles))
             i = call("track_info", {"id": byname["First"]})[1]
             chk("...marked as from MusicBrainz", i["edits"]["title"]["source"] == "musicbrainz" and i["mb"]["release"].startswith("1111") and i["track"]["coverv"] not in ("", "f"), str(i)[:300])
+            if not mobile:
+                # write the MusicBrainz edits into the files
+                import mutagen
+                pg.reload(); pg.wait_for_selector(".trk")
+                tap(".bar .btn:has-text('Write to files')"); pg.wait_for_selector(".sheet .wtr")
+                chk("the write screen lists the changes and says the gateway can't write yet", "First Light" in pg.inner_text(".sheet .wlist")
+                    and pg.locator(".wtr").count() == 2 and pg.locator(".gw.warn").count() == 1, pg.inner_text(".sheet")[:400])
+                tap(".sheet .dbtns .btn.go"); pg.wait_for_selector(".dbox:not(.sheet) .btn.go"); tap(".dbox:not(.sheet) .btn.go")
+                pg.wait_for_selector(".wst.queued", timeout=5000)
+                chk("asked: the files wait for the gateway", pg.locator(".wst.queued").count() == 2)
+                code, out = scan({"SCRAY_WRITE_TAGS": "1"}, ["--poll"])
+                pg.wait_for_selector(".wst.done", timeout=8000); pg.wait_for_timeout(3500)
+                f1 = mutagen.File(os.path.join(BOX, "Music", "Artist One", "Album A", "01 - First.flac"))
+                chk("the gateway wrote them and the screen says so", pg.locator(".wst.done").count() == 2 and f1["title"] == ["First Light"] and f1.pictures, out)
+                chk("...with Undo offered and nothing left to write", pg.is_visible(".sheet .dbtns .btn:has-text('Undo')") and pg.is_disabled(".sheet .dbtns .btn.go"))
+                tap(".sheet .dbtns .btn:has-text('Undo')"); pg.wait_for_selector(".dbox:not(.sheet) .btn.go"); tap(".dbox:not(.sheet) .btn.go")
+                pg.wait_for_selector(".wst.queued", timeout=5000)
+                code, out = scan({"SCRAY_WRITE_TAGS": "1"}, ["--poll"])
+                pg.wait_for_timeout(3500)
+                f1 = mutagen.File(os.path.join(BOX, "Music", "Artist One", "Album A", "01 - First.flac"))
+                chk("undo puts the file back", f1["title"] == ["First"] and not f1.pictures, str(f1.tags))
+                tap(".sheet .x")
+                chk("...and the page still shows the edits", pg.evaluate(titles) == ["First Light", "Second Wind"], pg.evaluate(titles))
+                call("edit_reset", body={"track_ids": list(range(1, 20))})
             chk("no page errors", errs == [], errs)
             b.close()
 finally:

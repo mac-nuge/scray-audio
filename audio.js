@@ -1193,6 +1193,82 @@
     if (album.value.trim()) search(); else setTimeout(() => album.focus(), 30);
   }
 
+  // ---- writing the edits into the files themselves (the gateway does it, when it is allowed to)
+  const FIELD_NAME = { title: 'Title', artist: 'Artist', album_artist: 'Album artist', album: 'Album', track_no: 'Track', disc_no: 'Disc', year: 'Year', genre: 'Genre' };
+  const JOB_SAYS = { queued: 'waiting for the gateway', working: 'writing…', done: 'written', failed: 'failed' };
+
+  function writeToFiles(tracks) {
+    if (needServer()) return;
+    const ids = tracks.map(t => t.id);
+    const byId = new Map(tracks.map(t => [t.id, t]));
+    const sh = openSheet('Write to the files', 'wide');
+    const gw = h('div', { class: 'gw' });
+    const list = h('div', { class: 'wlist' });
+    sh.body.append(h('p', { class: 'enote', text: 'This puts your edits (and a chosen cover) into the music files on the Storage Box, so they are part of the files from now on. Each file is checked before it replaces the old one, and “Undo last write” puts the files and your edits back as they were.' }), gw, list);
+    const undo = h('button', { class: 'btn', type: 'button', text: 'Undo last write' });
+    const close = h('button', { class: 'btn', type: 'button', text: 'Close', onclick: () => { stop(); sh.close(); } });
+    const go = h('button', { class: 'btn go', type: 'button', text: 'Write' });
+    sh.foot.append(undo, close, go);
+    let timer = 0, open = true, wasBusy = false;
+    const stop = () => { open = false; clearTimeout(timer); };
+    const x = sh.box.querySelector('.shead2 .x');
+    if (x) x.addEventListener('click', stop);
+
+    async function paint() {
+      if (!open || !sh.box.isConnected) { stop(); return; }
+      let j;
+      try { j = await api('push_status', { ids: ids.join(',') }); } catch (e) { list.replaceChildren(h('div', { class: 'empty', text: e.message })); return; }
+      const g = j.gateway;
+      gw.className = 'gw ' + (g.can_write && g.online ? 'ok' : 'warn');
+      gw.textContent = !g.online ? 'The gateway hasn’t checked in for a while, so nothing will be written until it does.'
+        : !g.can_write ? 'The gateway isn’t allowed to write yet. On the gateway: update scray-audio-scan.py and add SCRAY_WRITE_TAGS=1 to /etc/scray/audio-scan.env. Until then, anything you ask for waits here.'
+        : 'The gateway is set up to write.';
+      const todo = j.tracks.filter(t => (Object.keys(t.changes).length || t.cover) && t.writable);
+      const pending = j.tracks.filter(t => t.job && (t.job.state === 'queued' || t.job.state === 'working'));
+      const rows = j.tracks.filter(t => Object.keys(t.changes).length || t.cover || t.job).map(t => {
+        const tr = byId.get(t.id) || {};
+        const what = Object.entries(t.changes).map(([k, v]) => h('span', { class: 'wch' }, `${FIELD_NAME[k] || k}: `, h('s', { text: t.now[k] == null || t.now[k] === '' ? '—' : String(t.now[k]) }), ' → ', h('ins', { text: v === '' ? '(removed)' : v })));
+        if (t.cover) what.push(h('span', { class: 'wch', text: 'Cover: the chosen picture goes inside the file' }));
+        const st = t.job ? h('span', { class: 'wst ' + t.job.state, text: (t.job.kind === 'undo' ? 'undo ' : '') + JOB_SAYS[t.job.state] + (t.job.error ? `: ${t.job.error}` : '') }) : null;
+        return h('div', { class: 'wtr' }, h('b', { text: tr.title || t.path.split('/').pop() }),
+          !t.writable && what.length ? h('span', { class: 'wst failed', text: `${t.ext} files can’t be written` }) : null,
+          what.length ? h('div', { class: 'whats' }, what) : h('div', { class: 'enote', text: 'The file matches.' }), st);
+      });
+      list.replaceChildren(...(rows.length ? rows : [h('div', { class: 'empty', text: 'Nothing to write: the files already say what you see.' })]));
+      go.textContent = todo.length ? `Write ${plural(todo.length, 'file')}` : 'Write';
+      go.disabled = !todo.length || pending.length > 0;
+      const canUndo = j.tracks.filter(t => t.undo);
+      undo.hidden = !canUndo.length;
+      undo.disabled = pending.length > 0;
+      if (pending.length) { wasBusy = true; timer = setTimeout(paint, 3000); }
+      else if (wasBusy) { wasBusy = false; afterEditQuiet(); }
+    }
+    async function afterEditQuiet() {
+      try { const j = await apiPost('tracks_by_id', { ids }); tracksChanged(j.tracks); } catch (e) { /* the page will catch up */ }
+      const y = window.scrollY; route().then(() => window.scrollTo(0, y));
+    }
+    go.addEventListener('click', async () => {
+      const n = go.textContent.replace(/^Write /, '');
+      const yes = await dialog({ title: `Write ${n}?`, text: 'The files on the Storage Box are changed. You can undo it afterwards.', ok: 'Write' });
+      if (!yes) return;
+      try {
+        busy(go, true);
+        const j = await apiPost('push_request', { track_ids: ids });
+        toast(j.queued ? `${plural(j.queued, 'file')} queued for the gateway` : 'Nothing to write');
+        if (j.skipped && j.skipped.length) toast(`Skipped: ${j.skipped.join(', ')}`, true);
+      } catch (e) { toast(e.message, true); }
+      paint();
+    });
+    undo.addEventListener('click', async () => {
+      const yes = await dialog({ title: 'Undo the last write?', text: 'The files go back to the tags they had, and your edits come back as they were.', ok: 'Undo', danger: true });
+      if (!yes) return;
+      try { busy(undo, true); const j = await apiPost('push_undo', { track_ids: ids }); toast(`${plural(j.queued, 'file')} queued to put back`); } catch (e) { toast(e.message, true); }
+      busy(undo, false);
+      paint();
+    });
+    paint();
+  }
+
   // ------------------------------------------------------------------ views
   let viewSeq = 0;
   const show = (my, ...els) => { if (my === viewSeq) { view.replaceChildren(...els.filter(Boolean)); markNow(); } };
@@ -1340,7 +1416,8 @@
         h('div', { class: 'subtitle' }, who ? h('a', { href: `#/artist/${enc(who)}`, text: who }) : (folder ? 'Various artists' : h('a', { href: `#/artist/${enc(artist)}`, text: artist })), year ? ` · ${year}` : '', ` · ${plural(tracks.length, 'track')} · ${longTime(ms)}`))),
       actions(async () => tracks, h('span', { class: 'grp' },
         h('button', { class: 'btn', text: '✎ Edit', title: 'Edit the album and its tracks', onclick: () => editAlbum(tracks) }),
-        h('button', { class: 'btn', text: '⌕ MusicBrainz', title: 'Look this album up on MusicBrainz and fix its details and cover', onclick: () => findOnMB(tracks) }))),
+        h('button', { class: 'btn', text: '⌕ MusicBrainz', title: 'Look this album up on MusicBrainz and fix its details and cover', onclick: () => findOnMB(tracks) }),
+        tracks.some(t => t.edited) ? h('button', { class: 'btn', text: '⇪ Write to files', title: 'Put these edits into the music files themselves', onclick: () => writeToFiles(tracks) }) : null)),
       trackList(tracks, { noAlbum: true, albumArtist: who || undefined, trackNumbers: true, discs: true, inOrder: true }));
   }
 

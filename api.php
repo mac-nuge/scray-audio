@@ -274,6 +274,33 @@ SQL);
         }
         $db->exec('PRAGMA user_version = 5');
         $db->commit();
+        $ver = 5;
+    }
+    if ($ver < 6) {
+        // Writing edits into the files (the gateway does it, when it is allowed to). One job per file.
+        $db->beginTransaction();
+        $db->exec('ALTER TABLE tracks ADD COLUMN cover_pushed TEXT');      // the chosen cover now inside the file
+        $db->exec(<<<'SQL'
+CREATE TABLE IF NOT EXISTS push_jobs (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  track_id     INTEGER NOT NULL,
+  path         TEXT NOT NULL,
+  etag         TEXT,                -- the file as we knew it; the gateway refuses if it has changed since
+  kind         TEXT NOT NULL,       -- write | undo
+  changes      TEXT NOT NULL,       -- {field: new value} for the tags to change ('' = remove the tag)
+  cover        TEXT,                -- a chosen cover to put inside the file (audio-covers name)
+  drop_art     INTEGER NOT NULL DEFAULT 0,   -- undo: take out the picture we put in
+  before       TEXT,                -- file_tags before, and the edits before, for undo
+  had_art      INTEGER,             -- from the gateway: the file had a picture before
+  state        TEXT NOT NULL,       -- queued | working | done | failed
+  error        TEXT,
+  requested_at TEXT, started_at TEXT, finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS push_jobs_track ON push_jobs(track_id, id);
+CREATE INDEX IF NOT EXISTS push_jobs_state ON push_jobs(state);
+SQL);
+        $db->exec('PRAGMA user_version = 6');
+        $db->commit();
     }
     return $db;
 }
@@ -689,6 +716,47 @@ function shapeById(PDO $db, array $ids): array {
     return $sorted;
 }
 
+// ---- writing edits into the files (option B) ---------------------------------
+// The page asks; api.php queues one job per file; the gateway (scray-audio-scan.py --poll, only with
+// SCRAY_WRITE_TAGS=1) downloads the file, writes the tags, checks them, uploads it beside the original and
+// swaps it in. Each job keeps what the file and the edits were before, so it can be undone.
+const PUSH_FIELDS = ['title', 'artist', 'album_artist', 'album', 'track_no', 'disc_no', 'year', 'genre'];
+const PUSH_STUCK_SECS = 1800;
+
+/** For each track: what writing would change ({field: new}, and the cover), and its latest job. */
+function pushState(PDO $db, array $ids): array {
+    $out = [];
+    foreach (array_chunk(array_values(array_unique(array_map('intval', $ids))), 400) as $chunk) {
+        $in = implode(',', array_fill(0, count($chunk), '?'));
+        $edits = [];
+        foreach (run($db, "SELECT track_id, field, value FROM track_edits WHERE track_id IN ($in)", $chunk)->fetchAll() as $e) $edits[(int)$e['track_id']][$e['field']] = $e['value'];
+        $jobs = [];
+        foreach (run($db, "SELECT j.* FROM push_jobs j JOIN (SELECT track_id, MAX(id) m FROM push_jobs WHERE track_id IN ($in) GROUP BY track_id) x ON x.m = j.id", $chunk)->fetchAll() as $j) $jobs[(int)$j['track_id']] = $j;
+        foreach (run($db, "SELECT id, path, ext, etag, file_tags, cover_custom, cover_pushed FROM tracks WHERE deleted = 0 AND id IN ($in)", $chunk)->fetchAll() as $r) {
+            $id = (int)$r['id'];
+            $file = json_decode((string)($r['file_tags'] ?? ''), true) ?: [];
+            $ch = [];
+            foreach (PUSH_FIELDS as $f) if (array_key_exists($f, $edits[$id] ?? [])) $ch[$f] = (string)($edits[$id][$f] ?? '');
+            $cover = $r['cover_custom'] && $r['cover_custom'] !== $r['cover_pushed'] ? (string)$r['cover_custom'] : null;
+            $j = $jobs[$id] ?? null;
+            $out[$id] = ['id' => $id, 'path' => (string)$r['path'], 'ext' => (string)$r['ext'], 'etag' => $r['etag'], 'file' => $file, 'edits' => $edits[$id] ?? [],
+                'changes' => $ch, 'cover' => $cover, 'writable' => in_array($r['ext'], ['mp3', 'flac', 'm4a', 'ogg', 'oga', 'opus'], true),
+                'job' => $j ? ['id' => (int)$j['id'], 'kind' => $j['kind'], 'state' => $j['state'], 'error' => $j['error'], 'at' => $j['finished_at'] ?: $j['requested_at']] : null,
+                'undo' => $j && $j['kind'] === 'write' && $j['state'] === 'done'];
+        }
+    }
+    return $out;
+}
+function pushGateway(PDO $db): array {
+    $seen = metaGet($db, 'worker_seen_at');
+    $age = secsSince($seen);
+    return ['seen' => $seen, 'online' => $age !== null && $age < WORKER_SEEN_SECS, 'can_write' => metaGet($db, 'push_can_write') === '1'];
+}
+function pushUnstick(PDO $db): void {
+    run($db, "UPDATE push_jobs SET state = 'failed', error = 'the gateway stopped part-way; the file was not swapped', finished_at = :n
+              WHERE state = 'working' AND started_at < :t", [':n' => gmdate('c'), ':t' => gmdate('c', time() - PUSH_STUCK_SECS)]);
+}
+
 // ---- MusicBrainz + the Cover Art Archive ----------------------------------
 // About one request a second, and every request says who we are (their rules). Answers are kept a week.
 function mbUserAgent(array $secrets): string {
@@ -1048,6 +1116,59 @@ case 'tracks_by_id': {
     jsonOut(['ok' => true, 'tracks' => shapeById($db, $ids)]);
 }
 
+// ---- writing edits into the files ------------------------------------------------
+case 'push_status': {
+    pushUnstick($db);
+    $ids = array_values(array_filter(array_map('intval', explode(',', (string)($_GET['ids'] ?? ''))), static fn($i) => $i > 0));
+    if (count($ids) > 5000) fail(400, 'too many at once');
+    $st = pushState($db, $ids);
+    $tracks = [];
+    foreach ($st as $id => $t) $tracks[] = ['changes' => (object)$t['changes'], 'now' => (object)$t['file']] + array_diff_key($t, ['file' => 1, 'edits' => 1, 'etag' => 1]);
+    jsonOut(['ok' => true, 'gateway' => pushGateway($db), 'tracks' => $tracks,
+             'queued' => (int)run($db, "SELECT COUNT(*) FROM push_jobs WHERE state IN ('queued', 'working')")->fetchColumn()]);
+}
+
+case 'push_request': {
+    if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') fail(405, 'POST only');
+    $ids = plIds($in['track_ids'] ?? null, 'track_ids');
+    $db->beginTransaction();
+    $n = 0; $skipped = [];
+    $ins = $db->prepare("INSERT INTO push_jobs(track_id, path, etag, kind, changes, cover, before, state, requested_at)
+                         VALUES (:t, :p, :e, 'write', :c, :cv, :b, 'queued', :n)");
+    foreach (pushState($db, $ids) as $id => $t) {
+        if (!$t['changes'] && !$t['cover']) continue;
+        if (!$t['writable']) { $skipped[] = $t['path'] . ' (' . $t['ext'] . ' files can’t be written)'; continue; }
+        if ($t['job'] && in_array($t['job']['state'], ['queued', 'working'], true)) continue;
+        $ins->execute([':t' => $id, ':p' => $t['path'], ':e' => $t['etag'], ':c' => json_encode($t['changes'], JSON_UNESCAPED_UNICODE),
+                       ':cv' => $t['cover'], ':b' => json_encode(['file' => $t['file'], 'edits' => $t['edits']], JSON_UNESCAPED_UNICODE), ':n' => gmdate('c')]);
+        $n++;
+    }
+    $db->commit();
+    jsonOut(['ok' => true, 'queued' => $n, 'skipped' => $skipped, 'gateway' => pushGateway($db)]);
+}
+
+// Put the files (and the edits) back as they were before the last write.
+case 'push_undo': {
+    if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') fail(405, 'POST only');
+    $ids = plIds($in['track_ids'] ?? null, 'track_ids');
+    $db->beginTransaction();
+    $n = 0;
+    $ins = $db->prepare("INSERT INTO push_jobs(track_id, path, etag, kind, changes, cover, drop_art, before, state, requested_at)
+                         VALUES (:t, :p, :e, 'undo', :c, NULL, :d, :b, 'queued', :n)");
+    foreach (pushState($db, $ids) as $id => $t) {
+        if (!$t['undo']) continue;
+        $w = run($db, 'SELECT * FROM push_jobs WHERE id = :i', [':i' => $t['job']['id']])->fetch();
+        $before = json_decode((string)$w['before'], true) ?: [];
+        $back = [];
+        foreach (array_keys(json_decode((string)$w['changes'], true) ?: []) as $f) $back[$f] = (string)($before['file'][$f] ?? '');
+        $ins->execute([':t' => $id, ':p' => $t['path'], ':e' => $t['etag'], ':c' => json_encode($back, JSON_UNESCAPED_UNICODE),
+                       ':d' => $w['cover'] && !$w['had_art'] ? 1 : 0, ':b' => $w['before'], ':n' => gmdate('c')]);
+        $n++;
+    }
+    $db->commit();
+    jsonOut(['ok' => true, 'queued' => $n, 'gateway' => pushGateway($db)]);
+}
+
 // ---- MusicBrainz: find the release, then read it -----------------------------
 case 'mb_search': {
     $artist = trim((string)($_GET['artist'] ?? '')); $album = trim((string)($_GET['album'] ?? '')); $q = trim((string)($_GET['q'] ?? ''));
@@ -1271,12 +1392,76 @@ case 'audio_worker_start': {
 // request clears it, so one click starts one scan.
 case 'audio_worker_poll': {
     metaSet($db, 'worker_seen_at', gmdate('c'));
+    if (array_key_exists('can_write', $in)) metaSet($db, 'push_can_write', !empty($in['can_write']) ? '1' : '0');
     $want = metaGet($db, 'scan_requested_at') !== null;
     if ($want) {
         metaSet($db, 'scan_requested_at', null);
         metaSet($db, 'scan_claimed_at', gmdate('c'));
     }
-    jsonOut(['ok' => true, 'requested' => $want]);
+    pushUnstick($db);
+    jsonOut(['ok' => true, 'requested' => $want, 'push' => (int)run($db, "SELECT COUNT(*) FROM push_jobs WHERE state = 'queued'")->fetchColumn()]);
+}
+
+// The gateway takes the next few files to write. Each comes with a link to the cover to put in, if any.
+case 'audio_worker_push_next': {
+    pushUnstick($db);
+    $db->beginTransaction();
+    $jobs = run($db, "SELECT * FROM push_jobs WHERE state = 'queued' ORDER BY id LIMIT 10")->fetchAll();
+    $out = [];
+    foreach ($jobs as $j) {
+        run($db, "UPDATE push_jobs SET state = 'working', started_at = :n WHERE id = :i", [':n' => gmdate('c'), ':i' => (int)$j['id']]);
+        $cv = null;
+        if ($j['cover']) {
+            $e = time() + 3600;
+            $cv = selfUrl() . '?action=art&f=' . rawurlencode((string)$j['cover']) . '&e=' . $e . '&s=' . artSig($secrets, (string)$j['cover'], $e);
+        }
+        $out[] = ['id' => (int)$j['id'], 'kind' => $j['kind'], 'path' => $j['path'], 'etag' => $j['etag'],
+                  'changes' => json_decode((string)$j['changes'], true) ?: (object)[], 'cover_url' => $cv, 'drop_art' => (bool)$j['drop_art']];
+    }
+    $db->commit();
+    jsonOut(['ok' => true, 'jobs' => $out]);
+}
+
+// How it went. Written: the file's tags are now these, so the edits that match go (the cover stays chosen).
+// Undone: the file and the edits are back as they were before that write.
+case 'audio_worker_push_done': {
+    $id = (int)($in['id'] ?? 0);
+    $j = run($db, "SELECT * FROM push_jobs WHERE id = :i AND state = 'working'", [':i' => $id])->fetch();
+    if (!$j) fail(404, 'no such job in progress');
+    $now = gmdate('c');
+    $db->beginTransaction();
+    if (empty($in['ok'])) {
+        run($db, "UPDATE push_jobs SET state = 'failed', error = :e, finished_at = :n WHERE id = :i",
+            [':e' => mb_substr((string)($in['error'] ?? 'failed'), 0, 500, 'UTF-8'), ':n' => $now, ':i' => $id]);
+        $db->commit();
+        jsonOut(['ok' => true]);
+    }
+    $tid = (int)$j['track_id'];
+    $changes = json_decode((string)$j['changes'], true) ?: [];
+    $row = run($db, 'SELECT file_tags FROM tracks WHERE id = :i', [':i' => $tid])->fetch();
+    $file = json_decode((string)($row['file_tags'] ?? ''), true) ?: [];
+    foreach ($changes as $f => $v) $file[$f] = isset(EDIT_INT[$f]) ? ($v === '' ? null : (int)$v) : (string)$v;
+    $set = ['file_tags = :ft', 'updated_at = :n'];
+    $p = [':ft' => json_encode($file, JSON_UNESCAPED_UNICODE), ':n' => $now, ':i' => $tid];
+    if (isset($in['etag'])) { $set[] = 'etag = :e'; $p[':e'] = (string)$in['etag']; }
+    if (isset($in['size'])) { $set[] = 'size = :s'; $p[':s'] = (int)$in['size']; }
+    if ($j['kind'] === 'write') {
+        if ($j['cover']) { $set[] = 'cover_pushed = :cp'; $p[':cp'] = $j['cover']; }
+        run($db, 'UPDATE tracks SET ' . implode(', ', $set) . ' WHERE id = :i', $p);
+        trackEdit($db, $tid, array_map('strval', $changes), 'manual');     // each now matches the file, so its edit goes
+    } else {
+        if (!empty($j['drop_art'])) $set[] = 'cover_pushed = NULL';
+        run($db, 'UPDATE tracks SET ' . implode(', ', $set) . ' WHERE id = :i', $p);
+        $before = json_decode((string)$j['before'], true) ?: [];
+        run($db, 'DELETE FROM track_edits WHERE track_id = :t', [':t' => $tid]);
+        $put = $db->prepare('INSERT INTO track_edits(track_id, field, value, source, edited_at) VALUES (:t, :f, :v, :s, :a)');
+        foreach ((array)($before['edits'] ?? []) as $f => $v) $put->execute([':t' => $tid, ':f' => $f, ':v' => $v, ':s' => 'manual', ':a' => $now]);
+    }
+    run($db, "UPDATE push_jobs SET state = 'done', had_art = :h, finished_at = :n WHERE id = :i",
+        [':h' => isset($in['had_art']) ? (int)!empty($in['had_art']) : null, ':n' => $now, ':i' => $id]);
+    trackApply($db, [$tid]);
+    $db->commit();
+    jsonOut(['ok' => true]);
 }
 
 case 'audio_worker_progress': {
