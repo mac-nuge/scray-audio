@@ -745,7 +745,12 @@
 
   function trackMenuItems(t, ctx) {
     // Going to the page you are already on does nothing by itself: run the route again so it still answers.
-    const go = hash => () => { if (location.hash === hash) { route(); } else location.hash = hash; };
+    // Going somewhere closes the queue and Offline panels first, or on a phone they cover the page you went to.
+    const go = hash => () => {
+      $('queuepanel').hidden = true; $('bqueue').setAttribute('aria-pressed', 'false');
+      if (OFF && mode.panel) setDlPanel(false);
+      if (location.hash === hash) route(); else location.hash = hash;
+    };
     const known = v => v && v !== 'Unknown artist';
     const items = [];
     if (ctx.list) items.push({ label: 'Play', onclick: () => startQueue(ctx.list, ctx.index) });
