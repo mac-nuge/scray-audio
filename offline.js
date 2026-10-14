@@ -123,7 +123,7 @@
       },
       search(p) {
         const q = String(p.q == null ? '' : p.q).trim();
-        if (!q) return { ok: true, tracks: [], artists: [], albums: [] };
+        if (!q) return { ok: true, tracks: [], artists: [], albums: [], folders: [] };
         const tracks = filtered(p).sort((a, b) => cmp(nocase(a.albumArtist), nocase(b.albumArtist)) || cmp(nocase(a.album), nocase(b.album)) ||
           num(a.disc) - num(b.disc) || num(a.no) - num(b.no)).slice(0, 300);
         const fq = fold(q);
@@ -131,7 +131,7 @@
         const artists = byArtist.filter(([n]) => fold(n).includes(fq)).slice(0, 30).map(([name, ts]) => ({ name, tracks: ts.length }));
         const albums = sortByGroupKey(albumsOf(rows().filter(t => t.album !== ''))).filter(a => fold(a.album).includes(fq)).slice(0, 40)
           .map(a => ({ artist: a.artist, album: a.album, year: a.year, tracks: a.tracks, art: a.art }));
-        return { ok: true, tracks, artists, albums };
+        return { ok: true, tracks, artists, albums, folders: searchFolders(q) };
       },
       stats() {
         const r = rows();
@@ -140,6 +140,28 @@
           ms: r.reduce((s, t) => s + (t.ms || 0), 0), untagged: 0, scan: null, offline: true };
       },
     };
+    // api.php searchFolders(): folders whose path has every word, top-most only, with the tracks under each
+    function searchFolders(q) {
+      const words = fold(q.trim()).split(/\s+/).filter(Boolean);
+      if (!words.length) return [];
+      const count = new Map();
+      for (const t of rows()) {
+        const segs = t.folder.split('/');
+        for (let i = 1; i <= segs.length; i++) {
+          const f = segs.slice(0, i).join('/');
+          if (f) count.set(f, (count.get(f) || 0) + 1);
+        }
+      }
+      const hit = f => { const s = fold(f); return words.every(w => s.includes(w)); };
+      const out = [];
+      for (const [f, n] of count) {
+        if (!hit(f)) continue;
+        const i = f.lastIndexOf('/'), parent = i < 0 ? '' : f.slice(0, i);
+        if (parent && count.has(parent) && hit(parent)) continue;
+        out.push({ name: i < 0 ? f : f.slice(i + 1), path: f, tracks: n });
+      }
+      return out.sort((a, b) => natcase(a.path, b.path)).slice(0, 100);
+    }
     function sortByGroupKey(a) { return a.sort((x, y) => cmp(x.artist, y.artist) || cmp(x.album, y.album)); }   // GROUP BY order: binary
     return (action, params) => (A[action] ? A[action](params || {}) : null);
   }

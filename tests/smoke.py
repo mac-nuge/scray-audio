@@ -238,7 +238,9 @@ def main():
     all_tracks = call("tracks", {"order": "path"})[1]["tracks"]
     ids = [t["id"] for t in all_tracks]
     byname = {t["title"]: t["id"] for t in all_tracks}
-    check("no playlists to begin with", call("playlists")[1]["playlists"] == [])
+    pls0 = call("playlists")[1]["playlists"]
+    check("only the built-in Liked to begin with", [(p["name"], p["liked"], p["tracks"]) for p in pls0] == [("Liked", True, 0)], str(pls0))
+    lid = pls0[0]["id"]
     check("playlists need a session", call("playlists", cookie=False)[0] == 401 and call("playlist_create", cookie=False, body={"name": "x"})[0] == 401)
     check("the scanner key can't touch playlists", call("playlists", cookie=False, worker="test-worker-key")[0] == 401)
     check("a name is required", call("playlist_create", body={"name": "   "})[0] == 400)
@@ -251,7 +253,7 @@ def main():
     pid2 = j["id"]
     check("an empty playlist", st == 200 and j["added"] == 0)
     pls = call("playlists")[1]["playlists"]
-    check("list is sorted by name and has counts", [p["name"] for p in pls] == ["Second", "Évening mix"] or [p["name"] for p in pls] == ["Évening mix", "Second"], str(pls))
+    check("list has Liked first, then by name, with counts", [p["name"] for p in pls][0] == "Liked" and sorted(p["name"] for p in pls[1:]) == ["Second", "Évening mix"], str(pls))
     ev = [p for p in pls if p["id"] == pid][0]
     check("count, length, no missing", ev["tracks"] == 2 and ev["missing"] == 0 and 5500 < ev["ms"] < 6500, str(ev))
     j = call("playlist_add", body={"id": pid, "track_ids": [byname["Second"], byname["Tune"], 424242]})[1]
@@ -283,8 +285,32 @@ def main():
     check("unknown playlist is 404", call("playlist", {"id": 9999})[0] == 404 and call("playlist_delete", body={"id": 9999})[0] == 404)
     call("playlist_add", body={"id": pid2, "track_ids": ids})
     call("playlist_delete", body={"id": pid2})
-    check("delete removes it and its items", [p["id"] for p in call("playlists")[1]["playlists"]] == [pid]
+    check("delete removes it and its items", [p["id"] for p in call("playlists")[1]["playlists"]] == [lid, pid]
           and sqlite3.connect(DB).execute("SELECT COUNT(*) FROM playlist_items WHERE playlist_id = ?", (pid2,)).fetchone()[0] == 0)
+
+    print("liked")
+    check("nothing liked yet", call("liked")[1]["ids"] == [] and call("liked")[1]["id"] == lid)
+    check("like needs POST", call("like", {"track_ids[]": "1"})[0] == 405)
+    st, j = call("like", body={"track_ids": [byname["First"], byname["Second"], byname["First"], 424242], "on": True})
+    check("liking adds each live track once", st == 200 and j["changed"] == 2 and sorted(j["ids"]) == sorted([byname["First"], byname["Second"]]), str(j))
+    j = call("like", body={"track_ids": [byname["Tune"]], "on": True})[1]
+    check("the newest like is first", j["ids"][0] == byname["Tune"] and len(j["ids"]) == 3, str(j))
+    check("liking again changes nothing", call("like", body={"track_ids": [byname["Tune"]]})[1]["changed"] == 0)
+    check("adding to Liked as a playlist doesn't double up", call("playlist_add", body={"id": lid, "track_ids": [byname["Tune"], byname["Other"]]})[1]["added"] == 1)
+    j = call("like", body={"track_ids": [byname["Second"], byname["Other"]], "on": False})[1]
+    check("unliking takes them out", j["changed"] == 2 and sorted(j["ids"]) == sorted([byname["Tune"], byname["First"]]), str(j))
+    j = call("playlist", {"id": lid})[1]
+    check("Liked opens like any playlist", j["playlist"]["liked"] is True and [t["id"] for t in j["tracks"]] == [byname["Tune"], byname["First"]], str(j)[:300])
+    check("Liked can't be renamed", call("playlist_rename", body={"id": lid, "name": "Faves"})[0] == 400)
+    check("Liked can't be deleted", call("playlist_delete", body={"id": lid})[0] == 400)
+    check("no second playlist called Liked", call("playlist_create", body={"name": "liked"})[0] == 409)
+    check("liking needs a session", call("like", cookie=False, body={"track_ids": [1]})[0] == 401)
+
+    print("search finds folders")
+    f = call("search", {"q": "artist one"})[1]["folders"]
+    check("a matching folder, not its sub-folders", [x["path"] for x in f] == ["Music/Artist One"] and f[0]["tracks"] == 2, str(f))
+    f = call("search", {"q": "artist album"})[1]["folders"]
+    check("words can match across the path", [x["path"] for x in f] == ["Music/Artist One/Album A"], str(f))
 
     print("files that go away")
     os.remove(os.path.join(BOX, "Music", "Singles", "loose track.mp3"))

@@ -101,10 +101,12 @@ try:
         chk("Offline filter: folders show only where saved tracks are", names == ["Music"], names)
         pg.goto(PAGE + "#/artists"); pg.wait_for_selector(".item, .card, .list")
         chk("Offline filter: artists", pg.locator("body").inner_text().count("Artist One") >= 1 and "Various" not in pg.locator("#view").inner_text())
+        pg.goto(PAGE + "#/"); pg.wait_for_selector(".folder")      # from Folders, typing goes to the results (on Artists it filters Artists)
         pg.fill("#search", "first"); pg.wait_for_selector(".trk")
         chk("Offline filter: search", pg.locator(".trk").count() == 1)
         pg.fill("#search", "tune"); pg.wait_for_selector(".empty")
         chk("Offline filter: search finds nothing that isn't saved", True)
+        pg.fill("#search", ""); pg.wait_for_timeout(500)            # the term would otherwise carry over to the tabs
         pg.goto(PAGE + "#/album/Artist%20One/Album%20A"); pg.wait_for_selector(".trk")
         pg.evaluate("window.__played.length = 0")
         pg.locator(".trk").nth(0).click()
