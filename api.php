@@ -207,6 +207,22 @@ CREATE INDEX IF NOT EXISTS playlist_items_tr ON playlist_items(track_id);
 SQL);
         $db->exec('PRAGMA user_version = 3');
         $db->commit();
+        $ver = 3;
+    }
+    if ($ver < 4) {
+        // Liked: one built-in playlist (kind = 'liked'), always there, can't be renamed or deleted.
+        // A playlist you had already called "Liked" becomes it, so nothing is lost or doubled.
+        $db->beginTransaction();
+        $db->exec('ALTER TABLE playlists ADD COLUMN kind TEXT');
+        $mine = null;
+        foreach ($db->query('SELECT id, name FROM playlists ORDER BY id')->fetchAll() as $r) {
+            if (foldText(trim((string)$r['name'])) === 'liked') { $mine = (int)$r['id']; break; }
+        }
+        $now = gmdate('c');
+        if ($mine !== null) run($db, "UPDATE playlists SET kind = 'liked', name = 'Liked' WHERE id = :i", [':i' => $mine]);
+        else run($db, "INSERT INTO playlists(name, kind, created_at, updated_at) VALUES ('Liked', 'liked', :t, :t)", [':t' => $now]);
+        $db->exec('PRAGMA user_version = 4');
+        $db->commit();
     }
     return $db;
 }
@@ -322,6 +338,39 @@ function foldText(string $s): string {
     return $s;
 }
 
+/**
+ * Folders whose path has every word of the search, top-most only (a match's sub-folders are left out),
+ * with how many tracks are under each. offline.js does the same for the Offline filter.
+ */
+function searchFolders(PDO $db, string $q): array {
+    $words = array_values(array_filter(preg_split('/\s+/u', foldText(trim($q))) ?: [], static fn($w) => $w !== ''));
+    if (!$words) return [];
+    $count = [];                                          // every folder, ancestors included => tracks under it
+    foreach (run($db, 'SELECT folder, COUNT(*) n FROM tracks WHERE deleted = 0 GROUP BY folder')->fetchAll() as $r) {
+        $segs = explode('/', (string)$r['folder']);
+        for ($i = 1; $i <= count($segs); $i++) {
+            $f = implode('/', array_slice($segs, 0, $i));
+            if ($f === '') continue;
+            $count[$f] = ($count[$f] ?? 0) + (int)$r['n'];
+        }
+    }
+    $hit = static function (string $f) use ($words): bool {
+        $s = foldText($f);
+        foreach ($words as $w) if (!str_contains($s, $w)) return false;
+        return true;
+    };
+    $out = [];
+    foreach ($count as $f => $n) {
+        if (!$hit((string)$f)) continue;
+        $f = (string)$f;
+        $parent = ($i = strrpos($f, '/')) === false ? '' : substr($f, 0, $i);
+        if ($parent !== '' && isset($count[$parent]) && $hit($parent)) continue;
+        $out[] = ['name' => ($i === false ? $f : substr($f, $i + 1)), 'path' => $f, 'tracks' => $n];
+    }
+    usort($out, static fn($a, $b) => strnatcasecmp($a['path'], $b['path']));
+    return array_slice($out, 0, 100);
+}
+
 /** WHERE pieces shared by `tracks`: folder, artist, album, genre, q. */
 function trackFilters(): array {
     $w = ['deleted = 0'];
@@ -390,9 +439,24 @@ function plId(array $in): int {
     return $id;
 }
 function plRow(PDO $db, int $id): array {
-    $r = run($db, 'SELECT id, name, created_at, updated_at FROM playlists WHERE id = :i', [':i' => $id])->fetch();
+    $r = run($db, 'SELECT id, name, kind, created_at, updated_at FROM playlists WHERE id = :i', [':i' => $id])->fetch();
     if (!$r) fail(404, 'no such playlist');
     return $r;
+}
+/** Liked is built in: it can be added to and taken from, not renamed or deleted. */
+function plNotLiked(array $row): void {
+    if (($row['kind'] ?? null) === 'liked') fail(400, 'Liked is built in: it can’t be renamed or deleted');
+}
+function likedId(PDO $db): int {
+    $id = run($db, "SELECT id FROM playlists WHERE kind = 'liked' ORDER BY id LIMIT 1")->fetchColumn();
+    if ($id !== false) return (int)$id;
+    $now = gmdate('c');
+    run($db, "INSERT INTO playlists(name, kind, created_at, updated_at) VALUES ('Liked', 'liked', :t, :t)", [':t' => $now]);
+    return (int)$db->lastInsertId();
+}
+/** The track ids in Liked, newest first. */
+function likedIds(PDO $db, int $pl): array {
+    return array_map('intval', run($db, 'SELECT DISTINCT track_id FROM playlist_items WHERE playlist_id = :p ORDER BY pos, id', [':p' => $pl])->fetchAll(PDO::FETCH_COLUMN));
 }
 /** Ids from the request, whole numbers only, at most $PL_MAX_BATCH. */
 function plIds($v, string $what): array {
@@ -598,7 +662,7 @@ case 'genres': {
 // ---- search: tracks + artists + albums in one go ----------------------
 case 'search': {
     $q = trim((string)($_GET['q'] ?? ''));
-    if ($q === '') jsonOut(['ok' => true, 'tracks' => [], 'artists' => [], 'albums' => []]);
+    if ($q === '') jsonOut(['ok' => true, 'tracks' => [], 'artists' => [], 'albums' => [], 'folders' => []]);
     [$where, $p] = trackFilters();
     $tracks = run($db, "SELECT " . TRACK_COLS . " FROM tracks WHERE $where
                          ORDER BY album_artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no LIMIT 300", $p)->fetchAll();
@@ -618,7 +682,8 @@ case 'search': {
             'artist' => (string)$r['artist'], 'album' => (string)$r['album'],
             'year' => $r['year'] === null ? null : (int)$r['year'], 'tracks' => (int)$r['tracks'],
             'art' => $r['art'] === null ? null : (int)$r['art'],
-        ], array_slice($albums, 0, 40))]);
+        ], array_slice($albums, 0, 40)),
+        'folders' => searchFolders($db, $q)]);
 }
 
 // ---- url: a signed, expiring link to play one track -------------------
@@ -664,7 +729,8 @@ case 'cover': {
 
 // ---- playlists --------------------------------------------------------
 case 'playlists': {
-    $rows = run($db, "SELECT p.id, p.name, p.updated_at,
+    likedId($db);                                         // always listed, even before anything is liked
+    $rows = run($db, "SELECT p.id, p.name, p.kind, p.updated_at,
                              COUNT(t.id) AS tracks, COALESCE(SUM(t.duration_ms), 0) AS ms,
                              COUNT(i.id) - COUNT(t.id) AS missing,
                              (SELECT t2.id FROM playlist_items i2 JOIN tracks t2 ON t2.id = i2.track_id
@@ -674,9 +740,10 @@ case 'playlists': {
                         LEFT JOIN playlist_items i ON i.playlist_id = p.id
                         LEFT JOIN tracks t ON t.id = i.track_id AND t.deleted = 0
                        GROUP BY p.id")->fetchAll();
-    usort($rows, static fn($a, $b) => strcmp(foldText((string)$a['name']), foldText((string)$b['name'])));
+    usort($rows, static fn($a, $b) => (($b['kind'] === 'liked') <=> ($a['kind'] === 'liked'))
+        ?: strcmp(foldText((string)$a['name']), foldText((string)$b['name'])));
     jsonOut(['ok' => true, 'playlists' => array_map(static fn($r) => [
-        'id' => (int)$r['id'], 'name' => (string)$r['name'], 'tracks' => (int)$r['tracks'], 'ms' => (int)$r['ms'],
+        'id' => (int)$r['id'], 'name' => (string)$r['name'], 'liked' => $r['kind'] === 'liked', 'tracks' => (int)$r['tracks'], 'ms' => (int)$r['ms'],
         'missing' => (int)$r['missing'], 'art' => $r['art'] === null ? null : (int)$r['art'], 'updated' => $r['updated_at'],
     ], $rows)]);
 }
@@ -686,8 +753,44 @@ case 'playlist': {
     [$tracks, $missing] = plTracks($db, (int)$pl['id']);
     $ms = 0; $art = null;
     foreach ($tracks as $t) { $ms += (int)($t['ms'] ?? 0); if ($art === null && $t['cover']) $art = $t['id']; }
-    jsonOut(['ok' => true, 'playlist' => ['id' => (int)$pl['id'], 'name' => (string)$pl['name'], 'tracks' => count($tracks), 'ms' => $ms, 'missing' => $missing, 'art' => $art],
+    jsonOut(['ok' => true, 'playlist' => ['id' => (int)$pl['id'], 'name' => (string)$pl['name'], 'liked' => ($pl['kind'] ?? null) === 'liked', 'tracks' => count($tracks), 'ms' => $ms, 'missing' => $missing, 'art' => $art],
              'tracks' => $tracks]);
+}
+
+// ---- liked: the built-in playlist the hearts add to -----------------------
+case 'liked': {
+    $id = likedId($db);
+    jsonOut(['ok' => true, 'id' => $id, 'ids' => likedIds($db, $id)]);
+}
+
+// track_ids[] + on: true likes them (newest first, each once); on: false takes them out.
+case 'like': {
+    if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') fail(405, 'POST only');
+    $ids = plIds($in['track_ids'] ?? null, 'track_ids');
+    $on = !array_key_exists('on', $in) || !empty($in['on']);
+    $db->beginTransaction();
+    $pl = likedId($db);
+    $have = array_flip(likedIds($db, $pl));
+    $n = 0;
+    if ($on) {
+        $live = plLiveTrackIds($db, $ids);
+        $new = array_values(array_unique(array_filter($ids, static fn($t) => isset($live[$t]) && !isset($have[$t]))));
+        if (count($have) + count($new) > PL_MAX_ITEMS) fail(400, 'Liked holds at most ' . number_format(PL_MAX_ITEMS) . ' tracks');
+        if ($new) {
+            run($db, 'UPDATE playlist_items SET pos = pos + :n WHERE playlist_id = :p', [':n' => count($new), ':p' => $pl]);
+            $ins = $db->prepare('INSERT INTO playlist_items(playlist_id, pos, track_id, added_at) VALUES (:p, :o, :t, :a)');
+            $now = gmdate('c'); $o = 0;
+            foreach ($new as $t) $ins->execute([':p' => $pl, ':o' => ++$o, ':t' => $t, ':a' => $now]);
+            $n = count($new);
+        }
+    } else {
+        $del = $db->prepare('DELETE FROM playlist_items WHERE playlist_id = :p AND track_id = :t');
+        foreach (array_unique($ids) as $t) { $del->execute([':p' => $pl, ':t' => $t]); $n += $del->rowCount(); }
+        plRenumber($db, $pl, plItemIds($db, $pl));
+    }
+    if ($n) plTouch($db, $pl);
+    $db->commit();
+    jsonOut(['ok' => true, 'changed' => $n, 'id' => $pl, 'ids' => likedIds($db, $pl)]);
 }
 
 case 'playlist_create': {
@@ -703,7 +806,7 @@ case 'playlist_create': {
 }
 
 case 'playlist_rename': {
-    $id = plId($in); plRow($db, $id);
+    $id = plId($in); plNotLiked(plRow($db, $id));
     $name = plName($in);
     if (plNameTaken($db, $name, $id)) fail(409, "you already have a playlist called “$name”");
     run($db, 'UPDATE playlists SET name = :n, updated_at = :t WHERE id = :i', [':n' => $name, ':t' => gmdate('c'), ':i' => $id]);
@@ -711,7 +814,7 @@ case 'playlist_rename': {
 }
 
 case 'playlist_delete': {
-    $id = plId($in); plRow($db, $id);
+    $id = plId($in); plNotLiked(plRow($db, $id));
     $db->beginTransaction();
     run($db, 'DELETE FROM playlist_items WHERE playlist_id = :i', [':i' => $id]);
     run($db, 'DELETE FROM playlists WHERE id = :i', [':i' => $id]);
@@ -720,8 +823,12 @@ case 'playlist_delete': {
 }
 
 case 'playlist_add': {
-    $id = plId($in); plRow($db, $id);
+    $id = plId($in); $row = plRow($db, $id);
     $ids = plIds($in['track_ids'] ?? null, 'track_ids');
+    if (($row['kind'] ?? null) === 'liked') {             // Liked holds each track once
+        $have = array_flip(likedIds($db, $id));
+        $ids = array_values(array_unique(array_filter($ids, static fn($t) => !isset($have[$t]))));
+    }
     $db->beginTransaction();
     $added = plAppend($db, $id, $ids);
     $db->commit();

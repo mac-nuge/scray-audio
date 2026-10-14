@@ -25,6 +25,7 @@ $v = static fn(string $f): string => (string)@filemtime(__DIR__ . '/' . $f);
 <header id="top">
   <a class="brand" href="#/">scray<b>audio</b></a>
   <nav id="tabs">
+    <a href="#/search/" data-tab="search" id="tabres" hidden>Results</a>
     <a href="#/" data-tab="folders">Folders</a>
     <a href="#/artists" data-tab="artists">Artists</a>
     <a href="#/albums" data-tab="albums">Albums</a>
@@ -66,6 +67,7 @@ $v = static fn(string $f): string => (string)@filemtime(__DIR__ . '/' . $f);
   <div id="np">
     <div id="npcover" class="cover"><span>♪</span></div>
     <div id="nptext"><div id="nptitle">Nothing playing</div><div id="npsub"></div></div>
+    <button id="nplike" type="button" class="lk" hidden></button>
   </div>
   <div id="controls">
     <div class="row">

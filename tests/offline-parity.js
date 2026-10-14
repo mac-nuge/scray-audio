@@ -43,7 +43,7 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
     for (const al of (await srv('albums', { artist: a.name })).albums) await eq('tracks', { artist: a.name, album: al.album });
   }
   for (const g of (await srv('genres')).genres) await eq('tracks', { genre: g.name });
-  for (const q of ['second album', 'edith', 'Édith', 'café', 'the', 'a', 'compil', 'live', 'artist one', 'zzzz', '%', 'mp3 flac']) {
+  for (const q of ['second album', 'edith', 'Édith', 'café', 'the', 'a', 'compil', 'live', 'artist one', 'zzzz', '%', 'mp3 flac', 'music', 'various', 'artist album', 'singles', 'co']) {
     await eq('tracks', { q });
     await eq('search', { q });
   }

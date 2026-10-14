@@ -58,6 +58,10 @@
     return r;
   }
 
+  // Search folding: lower case, accents off (as api.php's foldText). Every word has to match somewhere.
+  const fold = s => String(s == null ? '' : s).toLowerCase().normalize('NFD').replace(/\p{Mn}+/gu, '');
+  const matches = (q, ...fields) => { const s = fold(fields.join(' ')); return fold(q).split(/\s+/).filter(Boolean).every(w => s.includes(w)); };
+
   let toastTimer = 0;
   function toast(msg, bad) {
     const t = $('toast');
@@ -279,6 +283,30 @@
     prefetchNext();
   }
 
+  // Add a whole list (an album, a folder, a search) at the end of the queue. Nothing queued yet: it starts playing.
+  function enqueueMany(list) {
+    list = (list || []).filter(Boolean);
+    if (!list.length) { toast('Nothing to add'); return; }
+    if (!P.queue.length) { startQueue(list, 0); return; }
+    P.orig.push(...list);
+    P.queue.push(...list);
+    toast(`Added ${plural(list.length, 'track')} to the queue`);
+    renderQueue();
+    prefetchNext();
+  }
+  const queueFrom = getTracks => async e => {
+    if (e) { e.preventDefault(); e.stopPropagation(); }
+    if (!P.queue.length) unlock();                       // it will start playing: keep the tap's permission
+    try { enqueueMany(await getTracks()); } catch (err) { toast(err.message, true); }
+  };
+
+  // A tap on a track in an album or a folder: that track, then the rest of the album in order (shuffle goes off,
+  // as the Play button does - a shuffle left on from "Shuffle all" would otherwise scatter the album).
+  function playFrom(list, i) {
+    setShuffle(false);
+    startQueue(list, i);
+  }
+
   function next(auto) {
     if (!P.queue.length) return;
     if (auto && P.repeat === 'one') { audio.currentTime = 0; audio.play().catch(() => {}); return; }
@@ -310,6 +338,60 @@
     audio.play().catch(() => {});
   }
 
+  // ---- Liked: a built-in playlist on the server; the hearts show what is in it (kept here too, for offline)
+  const LIKED = { ids: new Set(store.get('liked', [])), id: store.get('likedId', 0) };
+  function likedSet(ids, id) {
+    LIKED.ids = new Set(ids);
+    if (id) LIKED.id = id;
+    store.set('liked', [...LIKED.ids]); store.set('likedId', LIKED.id);
+    paintLikes();
+  }
+  async function loadLiked() {
+    if (APP && !APP.key) return;                         // not signed in: keep what we had
+    try { const j = await api('liked'); likedSet(j.ids, j.id); } catch (e) { /* offline: keep what we had */ }
+  }
+  async function like(list, on) {
+    list = list.filter(Boolean);
+    if (!list.length) return;
+    const before = new Set(LIKED.ids);
+    list.forEach(t => (on ? LIKED.ids.add(t.id) : LIKED.ids.delete(t.id)));
+    paintLikes();                                        // show it now; put it back if the server says no
+    try {
+      const j = await apiPost('like', { track_ids: list.map(t => t.id), on });
+      likedSet(j.ids, j.id);
+      if (list.length > 1 || !on) toast(on ? `Added ${plural(list.length, 'track')} to Liked` : `Removed ${plural(list.length, 'track')} from Liked`);
+      if (onPlaylist(LIKED.id)) refreshPlaylist(LIKED.id);
+    } catch (e) { LIKED.ids = before; paintLikes(); toast(e.message, true); }
+  }
+  /** Heart for one track. */
+  function likeBtn(t, cls) {
+    const b = h('button', { class: (cls || 'lk'), type: 'button', dataset: { like: t.id },
+      onclick: e => { e.preventDefault(); e.stopPropagation(); like([t], !LIKED.ids.has(t.id)); } });
+    paintLike(b);
+    return b;
+  }
+  function paintLike(b) {
+    const on = LIKED.ids.has(+b.dataset.like);
+    b.textContent = on ? '♥' : '♡';
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', String(on));
+    b.title = on ? 'Remove from Liked' : 'Add to Liked';
+    b.setAttribute('aria-label', b.title);
+  }
+  function paintLikes() { document.querySelectorAll('[data-like]').forEach(paintLike); }
+  /** Heart for a whole list (an album, a folder): likes what isn't liked yet; all liked already: offers to take them out. */
+  const likeAll = getTracks => async e => {
+    if (e) { e.preventDefault(); e.stopPropagation(); }
+    try {
+      const list = await getTracks();
+      if (!list.length) { toast('Nothing to like'); return; }
+      const todo = list.filter(t => !LIKED.ids.has(t.id));
+      if (todo.length) { like(todo, true); return; }
+      const yes = list.length === 1 || await dialog({ title: `Remove ${plural(list.length, 'track')} from Liked?`, text: 'They are all in Liked already.', ok: 'Remove', danger: true });
+      if (yes) like(list, false);
+    } catch (err) { toast(err.message, true); }
+  };
+
   function seekBy(sec) {
     if (P.idx < 0) return;
     const d = audio.duration;
@@ -333,6 +415,8 @@
 
   function paintNow(t) {
     $('nptitle').textContent = t.title;
+    const nl = $('nplike');
+    nl.dataset.like = t.id; nl.hidden = false; paintLike(nl);
     const sub = $('npsub');
     sub.replaceChildren();
     if (t.artist) sub.append(h('a', { href: `#/artist/${enc(t.albumArtist || t.artist)}`, text: t.artist }));
@@ -535,29 +619,35 @@
         h('span', { class: 'alb', text: t.album }),
         h('span', { class: 'dur', text: fmtMs(t.ms) }),
         h('span', { class: 'acts' },
+          likeBtn(t),
           h('button', {
             class: 'add', title: 'Add to queue (Shift: play next)', 'aria-label': 'Add to queue', text: '+',
             onclick: e => { e.stopPropagation(); enqueue(t, e.shiftKey); },
           }),
           h('button', {
             class: 'dots', title: 'More: go to album or artist, add to a playlist… (or right-click)', 'aria-label': 'More actions', 'aria-haspopup': 'menu', text: '⋯',
-            onclick: e => { e.stopPropagation(); openTrackMenu(t, { list: tracks, index: i, playlist: o.playlist }, { el: e.currentTarget, right: true }, e.currentTarget); },
+            onclick: e => { e.stopPropagation(); openTrackMenu(t, { list: tracks, index: i, playlist: o.playlist, inOrder: o.inOrder }, { el: e.currentTarget, right: true }, e.currentTarget); },
           })));
       row.addEventListener('contextmenu', e => {
         e.preventDefault();
         const at = e.clientX || e.clientY ? { x: e.clientX, y: e.clientY } : { el: row };   // the keyboard's menu key has no pointer
-        openTrackMenu(t, { list: tracks, index: i, playlist: o.playlist }, at, row);
+        openTrackMenu(t, { list: tracks, index: i, playlist: o.playlist, inOrder: o.inOrder }, at, row);
       });
-      row.addEventListener('click', () => startQueue(tracks, i));
-      row.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); startQueue(tracks, i); } });
+      const play = () => (o.inOrder ? playFrom(tracks, i) : startQueue(tracks, i));
+      row.addEventListener('click', play);
+      row.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); play(); } });
       box.append(row);
     });
     return box;
   }
 
   function albumCard(a) {
+    const tracksOf = async () => (await api('tracks', { artist: a.artist, album: a.album })).tracks;
     return h('a', { class: 'card', href: `#/album/${enc(a.artist)}/${enc(a.album)}` },
       h('div', { class: 'cv' }, coverEl(a.art),
+        h('span', { class: 'cbtns' },
+          h('button', { class: 'cb', type: 'button', title: 'Add to queue', 'aria-label': `Add ${a.album} to the queue`, text: '+', onclick: queueFrom(tracksOf) }),
+          h('button', { class: 'cb', type: 'button', title: 'Add to Liked', 'aria-label': `Like ${a.album}`, text: '♡', onclick: likeAll(tracksOf) })),
         h('button', {
           class: 'play', title: 'Play album', 'aria-label': `Play ${a.album}`, text: '▶',
           onclick: async e => {
@@ -577,6 +667,8 @@
     return h('div', { class: 'bar' },
       h('button', { class: 'btn go', text: '▶ Play', onclick: () => run(false) }),
       h('button', { class: 'btn', text: '🔀 Shuffle', onclick: () => run(true) }),
+      h('button', { class: 'btn', text: '＋ Queue', title: 'Add these to the end of the queue', onclick: queueFrom(getTracks) }),
+      o && o.noLike ? null : h('button', { class: 'btn', text: '♡ Like', title: 'Add these to Liked (all liked already: take them out)', onclick: likeAll(getTracks) }),
       o && o.noPlaylist ? null : h('button', {
         class: 'btn', text: '＋ Playlist', title: 'Add these tracks to a playlist', 'aria-haspopup': 'menu',
         onclick: e => { const b = e.currentTarget; openPicker({ el: b }, b, async () => (await getTracks()).map(t => t.id)); },
@@ -718,6 +810,7 @@
       if (!ids.length) { toast('Nothing to add'); return; }
       const j = await apiPost('playlist_add', { id: pl.id, track_ids: ids });
       toast(`Added ${plural(j.added, 'track')} to “${pl.name}”`);
+      if (pl.liked) loadLiked();
       if (onPlaylist(pl.id)) refreshPlaylist(pl.id);
     } catch (e) { toast(e.message, true); }
   }
@@ -749,6 +842,7 @@
 
   async function playlistOp(id, action, body, msg) {
     try { await apiPost(action, { id, ...body }); if (msg) toast(msg); } catch (e) { toast(e.message, true); }
+    if (id === LIKED.id) loadLiked();
     if (onPlaylist(id)) refreshPlaylist(id);
   }
 
@@ -762,7 +856,7 @@
     };
     const known = v => v && v !== 'Unknown artist';
     const items = [];
-    if (ctx.list) items.push({ label: 'Play', onclick: () => startQueue(ctx.list, ctx.index) });
+    if (ctx.list) items.push({ label: 'Play', onclick: () => (ctx.inOrder ? playFrom(ctx.list, ctx.index) : startQueue(ctx.list, ctx.index)) });
     items.push({ label: 'Play next', onclick: () => enqueue(t, true) }, { label: 'Add to queue', onclick: () => enqueue(t, false) }, { sep: true });
     if (t.album) items.push({ label: 'Go to album', hint: t.album, onclick: go(albumHash(t)) });
     if (known(t.albumArtist)) items.push({ label: 'Go to artist', hint: t.albumArtist, onclick: go(`#/artist/${enc(t.albumArtist)}`) });
@@ -772,6 +866,7 @@
       ? { label: 'Remove from offline', onclick: () => removeOffline(async () => [t]) }
       : { label: 'Save offline', onclick: () => saveOffline(async () => [t]) });
     items.push({ sep: true });
+    items.push(LIKED.ids.has(t.id) ? { label: 'Remove from Liked', onclick: () => like([t], false) } : { label: 'Add to Liked', onclick: () => like([t], true) });
     items.push({ label: 'Add to playlist', arrow: true, keep: true, onclick: () => showPicker(async () => [t.id], items) });
     if (ctx.playlist && t.entry) {
       const id = ctx.playlist.id, i = ctx.index, l = ctx.list;
@@ -792,6 +887,46 @@
   let viewSeq = 0;
   const show = (my, ...els) => { if (my === viewSeq) { view.replaceChildren(...els.filter(Boolean)); markNow(); } };
 
+  function folderRow(f, showPath) {
+    const tracksOf = async () => (await api('tracks', { folder: f.path, order: 'path', limit: 100000 })).tracks;
+    const parent = f.path.slice(0, Math.max(0, f.path.length - f.name.length - 1));
+    return h('a', { class: 'folder', href: `#/f/${enc(f.path)}` },
+      h('span', { class: 'ic', text: '📁' }),
+      h('span', { class: 'nm', title: f.path }, f.name, showPath && parent ? h('i', { class: 'fp', text: parent }) : null),
+      h('span', { class: 'ct', text: plural(f.tracks, 'track') }),
+      h('button', { class: 'pl', title: 'Add this folder to the queue', 'aria-label': `Add ${f.name} to the queue`, text: '+', onclick: queueFrom(tracksOf) }),
+      h('button', {
+        class: 'pl', title: 'Shuffle this folder', 'aria-label': `Shuffle ${f.name}`, text: '🔀',
+        onclick: async e => { e.preventDefault(); e.stopPropagation(); unlock(); try { playList(await tracksOf(), true); } catch (err) { toast(err.message, true); } },
+      }));
+  }
+
+  // ---- the search term, kept while you move between the tabs: each tab then shows what matches it
+  let term = (() => { try { return sessionStorage.getItem('scrayAudio.q') || ''; } catch (e) { return ''; } })();
+  function setTerm(q) {
+    term = String(q || '').trim();
+    try { sessionStorage.setItem('scrayAudio.q', term); } catch (e) { /* fine */ }
+    if ($('search').value.trim() !== term) $('search').value = term;
+    const tab = $('tabres');
+    tab.hidden = !term;
+    tab.href = '#/search/' + enc(term);
+  }
+  function clearTerm() {
+    setTerm('');
+    if (location.hash.startsWith('#/search/')) location.hash = '#/'; else route();
+  }
+  /** "3 albums match “x” · Show all" over a filtered tab. */
+  const matchNote = (n, what) => h('div', { class: 'fnote' },
+    n ? `${plural(n, what)} matching “${term}”` : `No ${what}s match “${term}”`, ' · ',
+    h('button', { class: 'lnk', type: 'button', text: 'Show all', onclick: clearTerm }));
+
+  async function viewFolderMatches(my) {
+    const j = await api('search', { q: term });
+    const f = j.folders || [];
+    show(my, h('h1', { class: 'title', text: 'Folders' }), matchNote(f.length, 'folder'),
+      f.length ? h('div', { class: 'folders' }, f.map(x => folderRow(x, true))) : null);
+  }
+
   async function viewFolders(my, path) {
     const [j, st] = await Promise.all([api('ls', { path }), path ? null : api('stats').catch(() => null)]);
     const segs = path ? path.split('/') : [];
@@ -807,16 +942,8 @@
     const out = [head];
     if (j.total) out.push(actions(j.folders.length ? folderTracks : async () => j.tracks));
 
-    if (j.folders.length) {
-      out.push(h('div', { class: 'folders' }, j.folders.map(f => h('a', { class: 'folder', href: `#/f/${enc(f.path)}` },
-        h('span', { class: 'ic', text: '📁' }), h('span', { class: 'nm', text: f.name, title: f.name }),
-        h('span', { class: 'ct', text: plural(f.tracks, 'track') }),
-        h('button', {
-          class: 'pl', title: 'Shuffle this folder', 'aria-label': `Shuffle ${f.name}`, text: '🔀',
-          onclick: async e => { e.preventDefault(); e.stopPropagation(); unlock(); try { playList((await api('tracks', { folder: f.path, order: 'path', limit: 100000 })).tracks, true); } catch (err) { toast(err.message, true); } },
-        })))));
-    }
-    if (j.tracks.length) out.push(trackList(j.tracks, { trackNumbers: false }));
+    if (j.folders.length) out.push(h('div', { class: 'folders' }, j.folders.map(f => folderRow(f))));
+    if (j.tracks.length) out.push(trackList(j.tracks, { trackNumbers: false, inOrder: true }));
     if (!j.total) {
       out.push(h('div', { class: 'empty', text: path ? 'Nothing in this folder.' : 'The library is empty. Run the scanner on the gateway (see the README), then reload.' }));
     }
@@ -833,7 +960,8 @@
   };
 
   async function viewArtists(my) {
-    const { artists } = await api('artists');
+    let { artists } = await api('artists');
+    if (term) artists = artists.filter(a => matches(term, a.name));
     const out = [];
     const jump = h('div', { class: 'jump' });
     const list = h('div');
@@ -850,8 +978,8 @@
       grid.append(h('a', { class: 'item', href: `#/artist/${enc(a.name)}` }, h('span', { class: 'nm', text: a.name, title: a.name }), h('span', { class: 'ct', text: plural(a.albums, 'album') })));
     }
     seen.forEach(l => jump.append(h('a', { href: 'javascript:void(0)', text: l, onclick: e => { e.preventDefault(); document.getElementById('L-' + l).scrollIntoView({ block: 'start' }); window.scrollBy(0, -100); } })));
-    out.push(h('h1', { class: 'title', text: 'Artists' }), h('div', { class: 'subtitle', text: plural(artists.length, 'artist') }), jump, list);
-    if (!artists.length) out.push(h('div', { class: 'empty', text: 'No artists yet.' }));
+    out.push(h('h1', { class: 'title', text: 'Artists' }), term ? matchNote(artists.length, 'artist') : h('div', { class: 'subtitle', text: plural(artists.length, 'artist') }), term ? null : jump, list);
+    if (!artists.length && !term) out.push(h('div', { class: 'empty', text: 'No artists yet.' }));
     show(my, ...out);
   }
 
@@ -874,11 +1002,13 @@
 
   async function viewAlbums(my) {
     const { albums } = await api('albums');
+    if (term) {
+      const hits = albums.filter(a => matches(term, a.album, a.artist));
+      show(my, h('h1', { class: 'title', text: 'Albums' }), matchNote(hits.length, 'album'), hits.length ? h('div', { class: 'grid' }, hits.map(albumCard)) : null);
+      return;
+    }
     const grid = h('div', { class: 'grid' });
-    const paint = q => {
-      q = q.trim().toLowerCase();
-      grid.replaceChildren(...albums.filter(a => !q || (a.album + ' ' + a.artist).toLowerCase().includes(q)).map(albumCard));
-    };
+    const paint = q => grid.replaceChildren(...albums.filter(a => !q.trim() || matches(q, a.album, a.artist)).map(albumCard));
     const f = h('input', { class: 'filter', type: 'search', placeholder: 'Filter albums', 'aria-label': 'Filter albums', oninput: () => paint(f.value) });
     paint('');
     show(my, h('h1', { class: 'title', text: 'Albums' }), h('div', { class: 'bar' }, f, h('span', { class: 'meta', text: plural(albums.length, 'album') })), grid,
@@ -899,7 +1029,7 @@
         h('h1', { class: 'title', text: album || '(no album)' }),
         h('div', { class: 'subtitle' }, who ? h('a', { href: `#/artist/${enc(who)}`, text: who }) : (folder ? 'Various artists' : h('a', { href: `#/artist/${enc(artist)}`, text: artist })), year ? ` · ${year}` : '', ` · ${plural(tracks.length, 'track')} · ${longTime(ms)}`))),
       actions(async () => tracks),
-      trackList(tracks, { noAlbum: true, albumArtist: who || undefined, trackNumbers: true, discs: true }));
+      trackList(tracks, { noAlbum: true, albumArtist: who || undefined, trackNumbers: true, discs: true, inOrder: true }));
   }
 
   // ---- playlists
@@ -914,27 +1044,37 @@
       e.preventDefault(); e.stopPropagation(); unlock();
       try { playList(await tracksOf(), shuffle); } catch (err) { toast(err.message, true); }
     };
-    const row = h('a', { class: 'plrow', href: `#/playlist/${p.id}` },
-      coverEl(p.art),
+    const row = h('a', { class: 'plrow' + (p.liked ? ' liked' : ''), href: `#/playlist/${p.id}` },
+      p.liked && p.art == null ? h('div', { class: 'cover likedcv', text: '♥' }) : coverEl(p.art),
       h('span', { class: 'pn' }, h('b', { text: p.name }),
         h('i', { text: [plural(p.tracks, 'track'), p.ms ? longTime(p.ms) : '', p.missing ? `${p.missing} missing` : ''].filter(Boolean).join(' · ') })),
       h('button', { class: 'pl', title: 'Play', 'aria-label': `Play ${p.name}`, text: '▶', onclick: play(false) }),
-      h('button', { class: 'pl', title: 'Shuffle', 'aria-label': `Shuffle ${p.name}`, text: '🔀', onclick: play(true) }));
+      h('button', { class: 'pl', title: 'Shuffle', 'aria-label': `Shuffle ${p.name}`, text: '🔀', onclick: play(true) }),
+      h('button', { class: 'pl', title: 'Add to queue', 'aria-label': `Add ${p.name} to the queue`, text: '+', onclick: queueFrom(tracksOf) }));
     row.addEventListener('contextmenu', e => {
       e.preventDefault();
       openMenu([
         { label: 'Play', onclick: () => { unlock(); tracksOf().then(l => playList(l, false)).catch(err => toast(err.message, true)); } },
         { label: 'Shuffle', onclick: () => { unlock(); tracksOf().then(l => playList(l, true)).catch(err => toast(err.message, true)); } },
-        { sep: true },
-        { label: 'Rename…', onclick: () => renamePlaylist(p, route) },
-        { label: 'Delete…', danger: true, onclick: () => deletePlaylist(p, route) },
+        { label: 'Add to queue', onclick: () => queueFrom(tracksOf)() },
+        ...(p.liked ? [] : [{ sep: true },
+          { label: 'Rename…', onclick: () => renamePlaylist(p, route) },
+          { label: 'Delete…', danger: true, onclick: () => deletePlaylist(p, route) }]),
       ], menuAt(e, row), row);
     });
     return row;
   }
 
   async function viewPlaylists(my) {
-    const { playlists } = await api('playlists');
+    let { playlists } = await api('playlists');
+    const lk = playlists.find(p => p.liked);
+    if (lk && lk.id !== LIKED.id) loadLiked();
+    if (term) {
+      playlists = playlists.filter(p => matches(term, p.name));
+      show(my, h('h1', { class: 'title', text: 'Playlists' }), matchNote(playlists.length, 'playlist'),
+        playlists.length ? h('div', { class: 'pls' }, playlists.map(playlistRow)) : null);
+      return;
+    }
     show(my,
       h('h1', { class: 'title', text: 'Playlists' }),
       h('div', { class: 'bar' }, h('button', { class: 'btn go', text: '＋ New playlist', onclick: () => newPlaylist(null) }),
@@ -952,21 +1092,22 @@
       h('div', { class: 'pagehead' }, coverEl(p.art), h('div', {},
         h('h1', { class: 'title', text: p.name }),
         h('div', { class: 'subtitle', text: meta }))),
-      actions(async () => tracks, h('span', { class: 'grp' },
+      actions(async () => tracks, p.liked ? null : h('span', { class: 'grp' },
         h('button', { class: 'btn', text: 'Rename', onclick: () => renamePlaylist(p, () => refreshPlaylist(p.id)) }),
-        h('button', { class: 'btn danger', text: 'Delete', onclick: () => deletePlaylist(p, after) })), { noPlaylist: true }),
+        h('button', { class: 'btn danger', text: 'Delete', onclick: () => deletePlaylist(p, after) })), { noPlaylist: true, noLike: p.liked }),
       p.missing ? h('div', { class: 'note' }, `${plural(p.missing, 'track')} no longer in the library (moved or deleted) ${p.missing === 1 ? 'is' : 'are'} hidden. `,
         h('button', { class: 'lnk', text: 'Remove from this playlist', onclick: () => playlistOp(p.id, 'playlist_remove', { missing: true }, 'Cleared') })) : null,
       tracks.length ? trackList(tracks, { playlist: { id: p.id } })
-        : h('div', { class: 'empty', text: 'Empty. Use ⋯ on a track, or “＋ Playlist” on an album, folder or search, and add to this playlist.' }));
+        : h('div', { class: 'empty', text: p.liked ? 'Nothing liked yet. Tap ♡ on any track, album or folder.' : 'Empty. Use ⋯ on a track, or “＋ Playlist” on an album, folder or search, and add to this playlist.' }));
   }
 
   async function viewGenres(my) {
-    const { genres } = await api('genres');
-    show(my, h('h1', { class: 'title', text: 'Genres' }), h('div', { class: 'subtitle', text: plural(genres.length, 'genre') }),
+    let { genres } = await api('genres');
+    if (term) genres = genres.filter(g => matches(term, g.name));
+    show(my, h('h1', { class: 'title', text: 'Genres' }), term ? matchNote(genres.length, 'genre') : h('div', { class: 'subtitle', text: plural(genres.length, 'genre') }),
       h('div', { class: 'list', style: 'margin-top:14px' }, genres.map(g => h('a', { class: 'item', href: `#/genre/${enc(g.name)}` },
         h('span', { class: 'nm', text: g.name }), h('span', { class: 'ct', text: plural(g.tracks, 'track') })))),
-      genres.length ? null : h('div', { class: 'empty', text: 'No genres tagged yet.' }));
+      genres.length || term ? null : h('div', { class: 'empty', text: 'No genres tagged yet.' }));
   }
 
   async function viewGenre(my, genre) {
@@ -979,7 +1120,10 @@
   async function viewSearch(my, q) {
     const j = await api('search', { q });
     const out = [h('h1', { class: 'title', text: `“${q}”` })];
-    if (!j.tracks.length && !j.artists.length && !j.albums.length) out.push(h('div', { class: 'empty', text: 'No matches.' }));
+    const folders = j.folders || [];
+    if (!j.tracks.length && !j.artists.length && !j.albums.length && !folders.length) out.push(h('div', { class: 'empty', text: 'No matches.' }));
+    if (folders.length) out.push(h('h2', { class: 'sec', text: 'Folders' }), h('div', { class: 'folders' }, folders.slice(0, 12).map(f => folderRow(f, true))),
+      folders.length > 12 ? h('a', { class: 'more', href: '#/', text: `All ${plural(folders.length, 'folder')} ›` }) : null);
     if (j.artists.length) out.push(h('h2', { class: 'sec', text: 'Artists' }), h('div', { class: 'list' }, j.artists.map(a =>
       h('a', { class: 'item', href: `#/artist/${enc(a.name)}` }, h('span', { class: 'nm', text: a.name }), h('span', { class: 'ct', text: plural(a.tracks, 'track') })))));
     if (j.albums.length) out.push(h('h2', { class: 'sec', text: 'Albums' }), h('div', { class: 'grid' }, j.albums.map(albumCard)));
@@ -988,19 +1132,21 @@
   }
 
   // ----------------------------------------------------------------- router
-  const TABS = { f: 'folders', '': 'folders', artists: 'artists', artist: 'artists', albums: 'albums', album: 'albums', genres: 'genres', genre: 'genres', playlists: 'playlists', playlist: 'playlists', search: '' };
+  const TABS = { f: 'folders', '': 'folders', artists: 'artists', artist: 'artists', albums: 'albums', album: 'albums', genres: 'genres', genre: 'genres', playlists: 'playlists', playlist: 'playlists', search: 'search' };
+  // The tabs that list things: with a search term, each shows only what matches it.
+  const listTab = () => { const k = location.hash.replace(/^#\/?/, '').split('/'); return (k[0] === '' && k.length === 1) || (k[0] === 'f' && !k[1]) || ['artists', 'albums', 'genres', 'playlists'].includes(k[0]) && k.length === 1; };
 
   async function route() {
     const my = ++viewSeq;
     const parts = (location.hash.replace(/^#\/?/, '')).split('/').map(s => { try { return decodeURIComponent(s); } catch (e) { return s; } });
     const kind = parts[0] || '';
     document.querySelectorAll('#tabs a').forEach(a => a.classList.toggle('on', a.dataset.tab === TABS[kind]));
-    if (kind !== 'search' && $('search').value) $('search').value = '';
+    if (kind === 'search') setTerm(parts[1] || ''); else setTerm(term);
     window.scrollTo(0, 0);
     view.replaceChildren(h('div', { class: 'loading', text: 'Loading…' }));
     try {
       switch (kind) {
-        case '': case 'f': await viewFolders(my, kind === 'f' ? (parts[1] || '') : ''); break;
+        case '': case 'f': if (term && !(kind === 'f' && parts[1])) await viewFolderMatches(my); else await viewFolders(my, kind === 'f' ? (parts[1] || '') : ''); break;
         case 'artists': await viewArtists(my); break;
         case 'artist': await viewArtist(my, parts[1] || ''); break;
         case 'albums': await viewAlbums(my); break;
@@ -1009,7 +1155,7 @@
         case 'playlist': await viewPlaylist(my, parseInt(parts[1], 10) || 0); break;
         case 'genres': await viewGenres(my); break;
         case 'genre': await viewGenre(my, parts[1] || ''); break;
-        case 'search': $('search').value = parts[1] || ''; await viewSearch(my, parts[1] || ''); break;
+        case 'search': if (term) await viewSearch(my, term); else show(my, h('div', { class: 'empty', text: 'Type in the search box.' })); break;
         default: show(my, h('div', { class: 'empty', text: 'Page not found.' }));
       }
     } catch (e) {
@@ -1019,17 +1165,24 @@
   }
   window.addEventListener('hashchange', route);
 
-  // search box: type to search, Enter to go now, empty to go back
+  // search box. The term stays as you move between the tabs (Artists, Albums, Genres, Playlists, Folders), and
+  // each shows what matches it; "Results" has everything. Typing on one of those tabs filters it in place;
+  // anywhere else it goes to Results. Emptying the box shows everything again.
   let searchTimer = 0;
   const go = q => {
-    q = q.trim();
+    const was = term;
+    setTerm(q);
+    if (term === was && !location.hash.startsWith('#/search/')) return;
     const onSearch = location.hash.startsWith('#/search/');
-    if (!q) { if (onSearch) location.hash = '#/'; return; }
-    const target = '#/search/' + enc(q);
+    const k = location.hash.replace(/^#\/?/, '').split('/')[0];
+    if (listTab() && k !== '' && k !== 'f') { route(); return; }      // Artists, Albums, Genres, Playlists: filter in place
+    if (!term) { if (onSearch) location.hash = '#/'; else route(); return; }
+    const target = '#/search/' + enc(term);
     if (onSearch) { history.replaceState(null, '', target); route(); } else location.hash = target;
   };
   $('search').addEventListener('input', e => { clearTimeout(searchTimer); searchTimer = setTimeout(() => go(e.target.value), 300); });
   $('searchform').addEventListener('submit', e => { e.preventDefault(); clearTimeout(searchTimer); go($('search').value); });
+  $('search').addEventListener('keydown', e => { if (e.key === 'Escape' && term) { e.preventDefault(); clearTimeout(searchTimer); clearTerm(); } });
 
 
   // ------------------------------------------------------------- scan panel
@@ -1159,6 +1312,7 @@
   $('scanrefresh').addEventListener('click', () => { scan.viewStale = false; $('scanrefresh').hidden = true; route(); });
   document.addEventListener('visibilitychange', () => { if (!document.hidden) scanTick(); });
 
+  $('nplike').addEventListener('click', e => { e.stopPropagation(); const t = P.queue[P.idx]; if (t) like([t], !LIKED.ids.has(t.id)); });
   $('np').addEventListener('contextmenu', e => {
     const t = P.queue[P.idx];
     if (!t) return;
@@ -1285,7 +1439,7 @@
 
   paintControls();
   paintPlay();
-  const start = () => { paintOffline(); route(); scanTick(); };
+  const start = () => { paintOffline(); route(); scanTick(); loadLiked(); };
   if (OFF) {
     OFF.init().then(() => { if (APP && !APP.key && OFF.count) mode.off = true; }).catch(() => {}).finally(start);
   } else start();

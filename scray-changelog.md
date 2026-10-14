@@ -7,6 +7,18 @@ named `test:` until it has been tried and then `stable:`. Record the reasoning, 
 
 ## Entries
 
+### audio 1.10 — test: queue, liked, search across tabs
+<!-- 2026-10-14T14:00Z -->
+- **Why:** four requests. (1) Playing from an album or folder should queue the rest of it. It already queued the list, but a shuffle left on (e.g. from "Shuffle all", which is remembered) scattered it, so it looked like it didn't. (2) An add-to-queue button for every track and album. Tracks had a "+" but it was invisible until hover on a computer. (3) Keep the search term while moving between Folders / Artists / Albums / Genres / Playlists, each showing what matches. (4) A heart on everything that adds to a built-in "Liked" playlist.
+- **What:**
+  - Tapping a track on an album or folder page plays it and then the rest of the album in order, turning shuffle off (as the Play button does). Search, genre, playlist and artist lists still follow the shuffle setting.
+  - "＋ Queue" in every action bar (album, folder, artist, genre, playlist, search), "+" on album cards, folder rows and playlist rows, and "Add to queue" in the playlist menu. The track "+" (and ⋯) now show faintly all the time instead of only on hover. Queueing when nothing is queued starts playing.
+  - The search term stays in the box and in the session. With a term: Artists, Albums, Genres and Playlists show only what matches (typing there filters in place); Folders shows matching folders, top-most only, with their path; a new "Results" tab is the everything page, which now lists folders too. "Show all", Escape or emptying the box clears it. Album, artist and folder pages always open whole.
+  - Liked: `api.php` schema v4 adds `playlists.kind`; a built-in playlist "Liked" (kind `liked`) always exists, comes first, can't be renamed or deleted, and holds each track once, newest first. A playlist already called "Liked" becomes it on upgrade (tested on a copy of a v3 database). New actions `liked` (ids) and `like` (POST, track_ids + on). Hearts on every track row, the now-playing strip, album cards and the action bars ("♡ Like" likes what isn't liked yet; if all are, it offers to take them out); "Add to Liked / Remove from Liked" in the track menu. The ids are also kept on the phone so the hearts show offline; liking needs the server.
+  - Search folders: `search` returns `folders`; `offline.js` does the same (parity test extended).
+- **Tested:** `tests/ui_library.py` (new, Playwright, desktop and phone sizes), `smoke.py` (Liked + folder search cases added), `ui_navigate.py`, `ui_offline.py` (updated for the kept term). Needs a new IPA. Untested on a phone.
+- **Not changed:** liking while offline isn't queued for later, it just says it can't reach the server.
+
 ### audio 1.9 — test: lock screen prev next again
 <!-- 2026-10-14T13:30Z -->
 - **Why:** build 14 (audio 1.8) still showed -10s / +10s on the lock screen. Clearing the seek handlers wasn't enough: WebKit drops the page's Media Session handlers when it becomes "now playing" and again whenever playback restarts (first play, each new track), and iOS then falls back to its own +/-10s pair. Ours were only set once, at page load, before anything played, so they were always dropped.
