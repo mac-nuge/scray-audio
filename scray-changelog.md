@@ -7,6 +7,12 @@ named `test:` until it has been tried and then `stable:`. Record the reasoning, 
 
 ## Entries
 
+### audio 1.6 — test: sideload link check
+<!-- 2026-10-14T10:50Z -->
+- **Why:** the first published build showed in SideStore (so `source.json` was written) but installing failed with "bbw-sounds-b6.ipa doesn't exist" and the app icon was blank: the IPA and icon were not being served from the URL, though the source was.
+- **What:** after publishing, the workflow lists the server folder and fetches the IPA, icon and `source.json` by their public links, the way SideStore does, and fails the run (with the folder listing and each link's status and size in an annotation) if any is not a 200 of the right size. It guesses nothing about the cause; it makes the cause visible in one run.
+- **Checked:** YAML parses. **Not tried:** the step itself runs only on the next manual build.
+
 ### audio 1.5 — test: BBW Sounds iOS app
 <!-- 2026-10-13T21:15Z -->
 - **Asked:** adapt the library into an iOS app, as a workflow that outputs an IPA, that can save files offline, kept in a folder like Scray Native's; named BBW Sounds. (The page and server half is audio 1.4.)
