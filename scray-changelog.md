@@ -7,6 +7,13 @@ named `test:` until it has been tried and then `stable:`. Record the reasoning, 
 
 ## Entries
 
+### audio 1.7 — test: easier sign-in and go-to fixes
+<!-- 2026-10-14T11:40Z -->
+- **Why:** (1) the app's sign-in sheet was clunky: its styles (`.sa-*`) were never written, so it showed as a bare form at the bottom of the page, and it asked for everything at once. (2) "Go to album" / "Go to artist" misbehaved. When a track has no album-artist tag, the server uses the track's own artist as the album artist, so a compilation splits into one-track "albums", and "Go to album" opened just that one track.
+- **What:** `app.js` signs in the way Scray Native does (`scray-device-key.js`): password first, the authenticator-code box only once the server asks, six digits submit by themselves, a recovery-code link, the library address tucked behind "change", "Later" lasts until the app is next opened. Styles added to `audio.css`. The Offline panel gets Sign in / Sign out (the app only; sign-out also tells the server, using the page's own dialog because the web view has no `confirm`). "Go to album" now opens "this album tag in this folder" (`#/album/<artist>/<album>/<folder>`), titled "Various artists" when the tracks disagree; the album link under a track name does the same. Going to the page you are already on re-runs it instead of doing nothing. An untagged track no longer offers "Go to artist: Unknown artist". `api.php` and `offline.js` sort an album read by folder the same way as one read by artist (kept in step).
+- **Tested:** `tests/ui_navigate.py` (new, Playwright, by hand): split compilation, accents, same-page, untagged track, and the sign-in flow against a pretend `device_pair`. `smoke.py`, `ui_offline.py` pass.
+- **Not changed:** artist pages are still keyed by album artist, so on a split compilation each track's artist still has its own page. Grouping by folder in the Albums/Artists lists would need a different rule; say if you want it.
+
 ### audio 1.6 — test: sideload link check
 <!-- 2026-10-14T10:50Z -->
 - **Why:** the first published build showed in SideStore (so `source.json` was written) but installing failed with "bbw-sounds-b6.ipa doesn't exist" and the app icon was blank: the IPA and icon were not being served from the URL, though the source was.

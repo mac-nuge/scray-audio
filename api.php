@@ -551,7 +551,7 @@ case 'tracks': {
         : 'album_artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no, filename COLLATE NOCASE';
     $rows = run($db, "SELECT " . TRACK_COLS . " FROM tracks WHERE $where ORDER BY $order LIMIT :lim", $p + [':lim' => $limit])->fetchAll();
     // One album read in order: use the same disc/track logic as a folder.
-    if (isset($_GET['album']) && isset($_GET['artist'])) $rows = sortTracks($rows);
+    if (isset($_GET['album']) && (isset($_GET['artist']) || isset($_GET['folder']))) $rows = sortTracks($rows);
     jsonOut(['ok' => true, 'tracks' => array_map('shapeTrack', $rows), 'capped' => count($rows) >= $limit]);
 }
 

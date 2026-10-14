@@ -52,7 +52,7 @@ $v = static fn(string $f): string => (string)@filemtime(__DIR__ . '/' . $f);
   <div id="dlmsg" class="smsg"></div>
   <div id="dllist" class="dllist"></div>
   <div id="dlfolder" class="smsg dim"></div>
-  <div class="sbtns"><button id="dlcancel" type="button" hidden>Cancel all</button><button id="dlretry" type="button" hidden>Retry failed</button><button id="dlfolderbtn" type="button">Choose folder…</button></div>
+  <div class="sbtns"><button id="dlcancel" type="button" hidden>Cancel all</button><button id="dlretry" type="button" hidden>Retry failed</button><button id="dlfolderbtn" type="button">Choose folder…</button><button id="dlsign" type="button" hidden></button></div>
 </section>
 
 <main id="view" tabindex="-1"></main>
