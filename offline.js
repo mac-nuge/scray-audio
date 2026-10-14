@@ -103,7 +103,7 @@
         else r.sort((a, b) => cmp(nocase(a.albumArtist), nocase(b.albumArtist)) || cmp(nocase(a.album), nocase(b.album)) ||
           num(a.disc) - num(b.disc) || num(a.no) - num(b.no) || cmp(nocase(fname(a)), nocase(fname(b))));
         r = r.slice(0, limit);
-        if (p.album != null && p.artist != null) r = sortTracks(r);
+        if (p.album != null && (p.artist != null || p.folder != null)) r = sortTracks(r);
         return { ok: true, tracks: r, capped: r.length >= limit };
       },
       artists() {

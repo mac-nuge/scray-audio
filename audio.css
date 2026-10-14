@@ -367,3 +367,25 @@ input[type="range"]::-moz-range-thumb { width: 14px; height: 14px; border-radius
   #offbtn, #dlbtn { padding: 8px 10px; }
   #dlpanel { top: 96px; right: 12px; }
 }
+
+
+/* ---- the app's sign-in sheet (app.js) */
+.sa-veil { position: fixed; inset: 0; z-index: 90; display: flex; justify-content: center; align-items: flex-start; overflow-y: auto;
+  padding: max(env(safe-area-inset-top), 7vh) 16px 0; background: rgba(0, 0, 0, .62); }
+.sa-card { width: min(100%, 360px); margin-bottom: 40vh; padding: 20px; border-radius: 12px; background: var(--panel); border: 1px solid var(--line);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .5); color: var(--text); }
+.sa-card h3 { margin: 0 0 6px; font-size: 16px; }
+.sa-card p { margin: 0 0 12px; color: var(--dim); font-size: 13px; }
+.sa-card label { display: block; margin: 0 0 4px; color: var(--dim); font-size: 12px; }
+.sa-card input { display: block; width: 100%; box-sizing: border-box; margin: 0 0 10px; padding: 11px 12px; border-radius: 8px;
+  background: var(--bg); border: 1px solid var(--line); color: var(--text); font: inherit; font-size: 16px; }
+.sa-card input:focus { outline: none; border-color: var(--accent); }
+.sa-card input.sa-code { letter-spacing: .3em; text-align: center; }
+.sa-step[hidden], .sa-link[hidden] { display: none; }
+.sa-link { display: block; margin: -4px 0 10px; padding: 0; background: none; border: 0; color: var(--accent); font: inherit; font-size: 12px; cursor: pointer; text-align: left; }
+.sa-err { min-height: 1.2em; margin: 4px 0 0; color: var(--danger); font-size: 13px; }
+.sa-err.sa-ok { color: #4cc38a; }
+.sa-row { display: flex; gap: 10px; margin-top: 6px; }
+.sa-row button { flex: 1; padding: 11px; border-radius: 8px; font: inherit; font-weight: 700; cursor: pointer; }
+.sa-go { background: var(--accent); border: 0; color: #06282a; }
+.sa-later { background: transparent; border: 1px solid var(--line); color: var(--text); }

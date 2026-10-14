@@ -15,6 +15,9 @@
   const $ = id => document.getElementById(id);
   const view = $('view');
   const enc = encodeURIComponent;
+  // An album's page. The folder is part of the link so an album whose tracks carry different album-artist
+  // tags (a compilation with no album-artist tag) still opens as one album.
+  const albumHash = t => `#/album/${enc(t.albumArtist)}/${enc(t.album)}` + (t.folder ? `/${enc(t.folder)}` : '');
 
   function h(tag, props, ...kids) {
     const el = document.createElement(tag);
@@ -333,7 +336,7 @@
     const sub = $('npsub');
     sub.replaceChildren();
     if (t.artist) sub.append(h('a', { href: `#/artist/${enc(t.albumArtist || t.artist)}`, text: t.artist }));
-    if (t.album) sub.append(' · ', h('a', { href: `#/album/${enc(t.albumArtist)}/${enc(t.album)}`, text: t.album }));
+    if (t.album) sub.append(' · ', h('a', { href: albumHash(t), text: t.album }));
     const cv = $('npcover');
     cv.replaceChildren(h('span', { text: '♪' }));
     if (t.cover) { const img = h('img', { alt: '' }); img.addEventListener('error', () => img.remove()); cv.append(img); setCover(img, t.id); }
@@ -740,12 +743,14 @@
   }
 
   function trackMenuItems(t, ctx) {
-    const go = hash => () => { location.hash = hash; };
+    // Going to the page you are already on does nothing by itself: run the route again so it still answers.
+    const go = hash => () => { if (location.hash === hash) { route(); } else location.hash = hash; };
+    const known = v => v && v !== 'Unknown artist';
     const items = [];
     if (ctx.list) items.push({ label: 'Play', onclick: () => startQueue(ctx.list, ctx.index) });
     items.push({ label: 'Play next', onclick: () => enqueue(t, true) }, { label: 'Add to queue', onclick: () => enqueue(t, false) }, { sep: true });
-    if (t.album && t.albumArtist) items.push({ label: 'Go to album', hint: t.album, onclick: go(`#/album/${enc(t.albumArtist)}/${enc(t.album)}`) });
-    if (t.albumArtist) items.push({ label: 'Go to artist', hint: t.albumArtist, onclick: go(`#/artist/${enc(t.albumArtist)}`) });
+    if (t.album) items.push({ label: 'Go to album', hint: t.album, onclick: go(albumHash(t)) });
+    if (known(t.albumArtist)) items.push({ label: 'Go to artist', hint: t.albumArtist, onclick: go(`#/artist/${enc(t.albumArtist)}`) });
     if (t.artist && t.artist !== t.albumArtist) items.push({ label: 'More by', hint: t.artist, onclick: go(`#/search/${enc(t.artist)}`) });
     if (t.folder) items.push({ label: 'Show in folder', hint: t.folder.split('/').pop(), onclick: go(`#/f/${enc(t.folder)}`) });
     if (OFF && t.path) items.push({ sep: true }, OFF.has(t.id)
@@ -865,18 +870,21 @@
       albums.length ? null : h('div', { class: 'empty', text: 'No albums yet.' }));
   }
 
-  async function viewAlbum(my, artist, album) {
-    const { tracks } = await api('tracks', { artist, album, limit: 5000 });
+  async function viewAlbum(my, artist, album, folder) {
+    // With a folder the album is "this album tag in this folder", whoever each track's album artist says it is.
+    const { tracks } = await api('tracks', folder ? { album, folder, limit: 5000 } : { artist, album, limit: 5000 });
     if (!tracks.length) { show(my, h('div', { class: 'empty', text: 'Album not found.' })); return; }
     const ms = tracks.reduce((n, t) => n + (t.ms || 0), 0);
     const year = (tracks.find(t => t.year) || {}).year;
     const cov = tracks.find(t => t.cover);
+    const aas = [...new Set(tracks.map(t => t.albumArtist))];
+    const who = aas.length === 1 ? aas[0] : '';              // one album artist, or none to name
     show(my,
       h('div', { class: 'pagehead' }, coverEl(cov ? cov.id : null), h('div', {},
         h('h1', { class: 'title', text: album || '(no album)' }),
-        h('div', { class: 'subtitle' }, h('a', { href: `#/artist/${enc(artist)}`, text: artist }), year ? ` · ${year}` : '', ` · ${plural(tracks.length, 'track')} · ${longTime(ms)}`))),
+        h('div', { class: 'subtitle' }, who ? h('a', { href: `#/artist/${enc(who)}`, text: who }) : (folder ? 'Various artists' : h('a', { href: `#/artist/${enc(artist)}`, text: artist })), year ? ` · ${year}` : '', ` · ${plural(tracks.length, 'track')} · ${longTime(ms)}`))),
       actions(async () => tracks),
-      trackList(tracks, { noAlbum: true, albumArtist: artist, trackNumbers: true, discs: true }));
+      trackList(tracks, { noAlbum: true, albumArtist: who || undefined, trackNumbers: true, discs: true }));
   }
 
   // ---- playlists
@@ -981,7 +989,7 @@
         case 'artists': await viewArtists(my); break;
         case 'artist': await viewArtist(my, parts[1] || ''); break;
         case 'albums': await viewAlbums(my); break;
-        case 'album': await viewAlbum(my, parts[1] || '', parts[2] || ''); break;
+        case 'album': await viewAlbum(my, parts[1] || '', parts[2] || '', parts[3] || ''); break;
         case 'playlists': await viewPlaylists(my); break;
         case 'playlist': await viewPlaylist(my, parseInt(parts[1], 10) || 0); break;
         case 'genres': await viewGenres(my); break;
@@ -1227,6 +1235,7 @@
     const list = jobs.filter(j => j.state !== 'cancelled');
     const done = list.filter(j => j.state === 'done').length;
     $('dlmsg').textContent = live ? `Saving ${plural(live, 'track')}…` : bad ? `${plural(bad, 'track')} failed` : 'Nothing downloading';
+    if (APP) $('dlsign').textContent = APP.key ? `Sign out${APP.name ? ' (' + APP.name + ')' : ''}` : 'Sign in';
     $('dlfolder').textContent = OFF.folder ? `Saved in “${OFF.folder}/Offline” · ${plural(OFF.count, 'track')}` : 'No folder chosen yet - you’ll be asked when you save something.';
     $('dllist').replaceChildren(...list.filter(j => j.state !== 'done').slice(0, 40).map(j => h('div', { class: 'dlrow' + (j.state === 'error' ? ' bad' : '') },
       h('span', { class: 'dn', text: j.track.title }),
@@ -1251,6 +1260,10 @@
     $('dlclose').addEventListener('click', () => setDlPanel(false));
     $('dlcancel').addEventListener('click', () => OFF.cancelAll());
     $('dlretry').addEventListener('click', () => OFF.retryFailed(dlCtx));
+    if (APP) {
+      $('dlsign').hidden = false;
+      $('dlsign').addEventListener('click', () => { if (!APP.key) { setDlPanel(false); APP.signIn(); } else dialog({ title: 'Sign this phone out?', text: 'It will need the password and a code to reach the library again. Saved music keeps playing.', ok: 'Sign out', danger: true }).then(yes => { if (yes) APP.signOut(); }); });
+    }
     $('dlfolderbtn').addEventListener('click', () => OFF.pickFolder().then(() => paintOffline()).catch(e => toast(e.message, true)));
     OFF.onChange(paintOffline);
   }
