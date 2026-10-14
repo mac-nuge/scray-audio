@@ -89,6 +89,9 @@ tr{cursor:pointer}
 tr:hover td{background:var(--panel)}
 tr.sel td{background:#132a35}
 td.num{text-align:right; color:var(--amber)}
+td.fold{max-width:300px; direction:rtl; text-align:left}   /* a long path keeps its end (the album folder) in view */
+td.fold a{color:var(--dim); text-decoration:none; unicode-bidi:plaintext}
+td.fold a:hover{color:var(--cyan)}
 td.why{white-space:normal; color:var(--dim); min-width:240px}
 td.why b{color:var(--text); font-weight:500}
 .pill{display:inline-block; padding:1px 7px; border-radius:9px; font-size:10.5px; letter-spacing:.04em}

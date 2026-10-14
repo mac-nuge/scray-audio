@@ -48,6 +48,8 @@ try:
         chk("the progress bar is full", pg.evaluate("document.getElementById('fill').style.width") == "100%", pg.evaluate("document.getElementById('fill').style.width"))
         chk("the list shows every album", pg.locator("#results tbody tr").count() == 6)
         chk("no stray text under the list", "null" not in pg.inner_text("#results"))
+        chk("a folder column, linking to the folder", pg.locator("#results th:has-text('FOLDER')").count() == 1
+            and pg.locator("#results td.fold a[href='index.php#/f/Music%2FBand%20X%2FOrigins']").count() == 1)
         pg.click(".tile:has-text('TO REVIEW')"); pg.wait_for_timeout(500)
         chk("a tile filters the list", pg.locator("#results tbody tr").count() == 3 and pg.locator("#seg button.on").inner_text() == "TO REVIEW")
         pg.click("#results tbody tr:has-text('Compilation Two')"); pg.wait_for_timeout(800)
