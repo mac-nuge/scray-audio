@@ -57,7 +57,7 @@ class H(BaseHTTPRequestHandler):
         self.do_GET()
 
     def do_GET(self):
-        u = urllib.parse.urlparse(self.path)
+        u = urllib.parse.urlsplit(self.path)
         path = urllib.parse.unquote(u.path)
         if path.startswith("/a/"):                       # the gateway
             q = urllib.parse.parse_qs(u.query)
@@ -82,22 +82,23 @@ class H(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         if n:
             self.rfile.read(n)
-        path = urllib.parse.unquote(urllib.parse.urlparse(self.path).path)
+        path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
         p = self.real(path.strip("/"))
         if p and os.path.isfile(p):                      # Depth 0 on a file
             st = os.stat(p)
-            body = ('<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:"><D:response><D:href>' + urllib.parse.quote(path)
+            body = ('<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:"><D:response><D:href>' + urllib.parse.quote(path, safe="/;")
                     + f'</D:href><D:propstat><D:prop><D:resourcetype/><D:getcontentlength>{st.st_size}</D:getcontentlength>'
                     + f'<D:getetag>"{st.st_size:x}-{st.st_mtime_ns:x}"</D:getetag><D:getlastmodified>x</D:getlastmodified></D:prop>'
                     + '<D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response></D:multistatus>').encode()
             return self.send(207, body, {"Content-Type": "text/xml; charset=utf-8"})
         if not p or not os.path.isdir(p):
             return self.send(404)
+        # like a real WebDAV server may, ";" comes back as it is (it is allowed in a path)
         def resp(href, p2):
             if os.path.isdir(p2):
-                return f"<D:response><D:href>{urllib.parse.quote(href)}</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>"
+                return f"<D:response><D:href>{urllib.parse.quote(href, safe="/;")}</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>"
             st = os.stat(p2)
-            return (f"<D:response><D:href>{urllib.parse.quote(href)}</D:href><D:propstat><D:prop><D:resourcetype/>"
+            return (f"<D:response><D:href>{urllib.parse.quote(href, safe="/;")}</D:href><D:propstat><D:prop><D:resourcetype/>"
                     f"<D:getcontentlength>{st.st_size}</D:getcontentlength><D:getetag>\"{st.st_size:x}-{st.st_mtime_ns:x}\"</D:getetag>"
                     f"<D:getlastmodified>x</D:getlastmodified></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>")
         base = "/" + path.strip("/") + ("/" if path.strip("/") else "")
@@ -115,7 +116,7 @@ class H(BaseHTTPRequestHandler):
             self.send(401, b"", {"WWW-Authenticate": 'Basic realm="x"'}); return None
         if os.environ.get("FAKE_READONLY") == "1":
             self.send(403); return None
-        p = self.real(urllib.parse.unquote(urllib.parse.urlparse(self.path).path).lstrip("/"))
+        p = self.real(urllib.parse.unquote(urllib.parse.urlsplit(self.path).path).lstrip("/"))
         if not p:
             self.send(403); return None
         return p
@@ -137,7 +138,7 @@ class H(BaseHTTPRequestHandler):
         p = self.writable()
         if not p:
             return
-        dst = self.real(urllib.parse.unquote(urllib.parse.urlparse(self.headers.get("Destination", "")).path).lstrip("/"))
+        dst = self.real(urllib.parse.unquote(urllib.parse.urlsplit(self.headers.get("Destination", "")).path).lstrip("/"))
         if not dst or not os.path.isfile(p):
             return self.send(404 if dst else 403)
         existed = os.path.exists(dst)

@@ -173,11 +173,13 @@ def propfind(folder):
     if status != 207:
         raise RuntimeError(f"PROPFIND {folder or '/'}: HTTP {status}")
     ns = {"d": "DAV:"}
-    me = urllib.parse.unquote(urllib.parse.urlparse(url).path).rstrip("/")
+    # urlsplit, not urlparse: urlparse cuts a path at ";" (old URL "params"), and the box may send names
+    # like "02 Cantus II; In Memory.mp3" with the ";" as it is - which then lost their extension and were skipped.
+    me = urllib.parse.unquote(urllib.parse.urlsplit(url).path).rstrip("/")
     out = []
     for resp in ET.fromstring(body).findall("d:response", ns):
         href = resp.findtext("d:href", "", ns)
-        path = urllib.parse.unquote(urllib.parse.urlparse(href).path)
+        path = urllib.parse.unquote(urllib.parse.urlsplit(href).path)
         if path.rstrip("/") == me:
             continue
         name = path.rstrip("/").rsplit("/", 1)[-1]

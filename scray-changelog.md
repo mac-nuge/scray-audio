@@ -7,6 +7,13 @@ named `test:` until it has been tried and then `stable:`. Record the reasoning, 
 
 ## Entries
 
+### audio 1.15 — test: semicolon in file names
+<!-- 2026-10-14T19:45Z -->
+- **Why:** "02 Cantus II; In Memory of Warren Wiltzie.mp3" never appeared in the library. The scanner read the box's folder listing with Python's `urlparse`, which treats a `;` in a path as the start of old-style URL "parameters" and cuts the path there. When the box sends the `;` unescaped (allowed in a URL path), the name became "02 Cantus II", with no extension, so it wasn't taken for audio and was skipped without a word.
+- **What:** `gateway/scray-audio-scan.py` uses `urlsplit` (which doesn't do that) when reading hrefs. The test box now sends `;` unescaped like a real server may (and uses `urlsplit` itself).
+- **Tested:** reproduced first: the old scanner misses the file against the test box, the new one finds it. `smoke.py` now has a file with `;` and one with `% # [ ] ( ) '`: scanned, played through the signed link, and (the `;` one) written to. `bulk_mb.py`, `ui_edit.py`, `ui_offline.py` pass. Nothing else needed changing: api.php, the gateway's signed links and the page already escape these.
+- **To use:** copy the new `gateway/scray-audio-scan.py` to `/opt/scray/`, then scan. Gateway only: no upload, no new IPA.
+
 ### audio 1.14 — test: bulk musicbrainz
 <!-- 2026-10-14T20:30Z -->
 - **Why:** (1) in the album's MusicBrainz screen, everything should be ticked to start with. (2) A bulk MusicBrainz page to fix the whole library, run on the server with full progress (like bulk Stash), taking the oldest (original) release or the best match, leaving the truly unclear and the not-found for review, and bringing in collaborators and remixers.

@@ -470,6 +470,32 @@ def main():
     r = call("tracks", {"folder": "Music/Artist One"})[1]["tracks"]
     check("a changed file gets new tags", [x["title"] for x in r] == ["Renamed"], str(r))
 
+    print("awkward file names")
+    odd = os.path.join(BOX, "Music", "Artist One", "Album A")
+    ff(os.path.join(odd, "03 Cantus II; In Memory of Warren Wiltzie.mp3"), dict(title="Cantus II", artist="Artist One", album="Album A", track="3"), "libmp3lame", "-b:a", "128k")
+    ff(os.path.join(odd, "04 100% Pure #1 [live] (it's).mp3"), dict(title="Pure", artist="Artist One", album="Album A", track="4"), "libmp3lame", "-b:a", "128k")
+    code, out = scan()
+    r = {t["title"]: t for t in call("tracks", {"folder": "Music/Artist One"})[1]["tracks"]}
+    check("a name with “;” is scanned (the box sends it unescaped)", "Cantus II" in r and r["Cantus II"]["path"].endswith("03 Cantus II; In Memory of Warren Wiltzie.mp3"), str(list(r)))
+    check("...and one with % # [ ] ( ) '", "Pure" in r and r["Pure"]["path"].endswith("04 100% Pure #1 [live] (it's).mp3"), str(list(r)))
+    for t in ("Cantus II", "Pure"):
+        u = call("url", {"id": r[t]["id"]})[1]["url"]
+        with urllib.request.urlopen(u) as resp:
+            check(f"...“{t}” plays through its signed link", resp.status == 200 and len(resp.read()) > 1000)
+    call("edit", body={"items": [{"id": r["Cantus II"]["id"], "set": {"title": "Cantus II: In Memory of Warren Wiltzie"}}]})
+    call("push_request", body={"track_ids": [r["Cantus II"]["id"]]})
+    code, out = scan({"SCRAY_WRITE_TAGS": "1"}, ["--poll"])
+    import mutagen
+    f = mutagen.File(os.path.join(odd, "03 Cantus II; In Memory of Warren Wiltzie.mp3"))
+    check("...and can be written to", str(f.tags["TIT2"]) == "Cantus II: In Memory of Warren Wiltzie"
+          and not [n for n in os.listdir(odd) if n.endswith(".scray-tmp")], out + str(f.tags))
+    with sqlite3.connect(DB) as c:
+        c.execute("DELETE FROM meta WHERE k IN ('worker_seen_at', 'push_can_write')")
+    for n in os.listdir(odd):
+        if n.startswith(("03 ", "04 ")):
+            os.remove(os.path.join(odd, n))
+    scan()
+
     print("scan button and live progress")
     W = dict(cookie=False, worker="test-worker-key")
     scan()   # a full scan, so we start from a known library
