@@ -148,11 +148,13 @@
     $('rowMeta').textContent = S.total ? `${n0(S.rows.length)} of ${n0(S.total)}` : '';
     if (!S.rows.length) { box.replaceChildren(h('div', { class: 'empty', text: S.status && S.status.run ? 'Nothing here.' : 'Start a run: every album is looked up on MusicBrainz, one at a time. It runs on the server, so you can close this tab and come back.' })); return; }
     const y = box.scrollTop;
-    const table = h('table', {}, h('thead', {}, h('tr', {}, ['', 'ALBUM', 'ARTIST', 'TRACKS', 'RESULT', 'WHEN'].map(t => h('th', { text: t })))),
+    const table = h('table', {}, h('thead', {}, h('tr', {}, ['', 'ALBUM', 'ARTIST', 'FOLDER', 'TRACKS', 'RESULT', 'WHEN'].map(t => h('th', { text: t })))),
       h('tbody', {}, S.rows.map(r => h('tr', { class: S.sel && S.sel.id === r.id ? 'sel' : '', onclick: () => openDrawer(r) },
         h('td', {}, h('span', { class: 'pill ' + r.state, text: STATE_NAME[r.state] || r.state })),
-        h('td', { title: r.folder, text: r.album }),
+        h('td', { title: r.album, text: r.album }),
         h('td', { text: r.artist || '—' }),
+        h('td', { class: 'fold', title: r.folder }, h('a', { href: `index.php#/f/${enc(r.folder)}`, target: '_blank', rel: 'noopener',
+          text: r.folder, onclick: e => e.stopPropagation() })),
         h('td', { class: 'num', text: r.tracks }),
         h('td', { class: 'why' }, result(r)),
         h('td', { text: r.updated_at ? ago(r.updated_at) : '' })))));

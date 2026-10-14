@@ -7,6 +7,12 @@ named `test:` until it has been tried and then `stable:`. Record the reasoning, 
 
 ## Entries
 
+### audio 1.17 — test: folder column in bulk musicbrainz
+<!-- 2026-10-14T20:30Z -->
+- **Why:** asked for the folder as its own column on bulk-mb.php (it was only a tooltip on the album name).
+- **What:** `bulk-mb.js` adds a FOLDER column after ARTIST: the full path, linking to that folder in the library (new tab; clicking it doesn't open the drawer). A long path is cut at its start, so the album folder at its end stays visible; the whole path is in the tooltip. Page only: no IPA.
+- **Tested:** `tests/ui_bulk.py` (the column and its link), screenshot checked.
+
 ### audio 1.16 — test: no audio skipped, list what is not added
 <!-- 2026-10-14T20:10Z -->
 - **Why:** after the `;` fix: don't skip any audio file, or say which and why. The scanner skipped some silently: every name starting with "." or "@" (meant for NAS folders like @eaDir, but it caught a real "@Home" album too); a name with "?" or "#" if the box sends them unescaped (same cause as `;`); unsupported formats (wma, ape, ...); folders the box wouldn't list (only in the gateway's log). A backslash in a name ("AC\DC") was turned into "/" by api.php, so such a track was listed but couldn't play. And WAV / AIFF tags were never read (they're ID3 frames or a RIFF INFO block, which the reader didn't look at).
