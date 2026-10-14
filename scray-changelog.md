@@ -7,6 +7,12 @@ named `test:` until it has been tried and then `stable:`. Record the reasoning, 
 
 ## Entries
 
+### audio 1.11 — test: swipe between tabs
+<!-- 2026-10-14T14:20Z -->
+- **Why:** on the phone, moving between Folders / Artists / Albums / Genres / Playlists meant reaching for the tab strip; asked to swipe left and right.
+- **What:** `audio.js` treats a quick, clearly sideways swipe (70 px or more, less than half as much up/down, under 0.7 s) on the page as next / previous tab, in the strip's order (Results first while there is a search term). It ignores swipes that start on the tab strip or the A-Z letters (they scroll sideways), sliders, inputs, menus, panels and the player. A short slide-in shows which way you went (off with reduced motion). Album / artist / folder pages count as their tab, so a swipe there moves to the next tab. Needs a new IPA. Untested on a phone.
+- **Tested:** `tests/ui_library.py` (swipe cases with synthetic touches at phone size); also fixed a timing flake in its search check.
+
 ### audio 1.10 — test: queue, liked, search across tabs
 <!-- 2026-10-14T14:00Z -->
 - **Why:** four requests. (1) Playing from an album or folder should queue the rest of it. It already queued the list, but a shuffle left on (e.g. from "Shuffle all", which is remembered) scattered it, so it looked like it didn't. (2) An add-to-queue button for every track and album. Tracks had a "+" but it was invisible until hover on a computer. (3) Keep the search term while moving between Folders / Artists / Albums / Genres / Playlists, each showing what matches. (4) A heart on everything that adds to a built-in "Liked" playlist.
