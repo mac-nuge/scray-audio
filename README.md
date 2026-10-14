@@ -112,6 +112,18 @@ what the files' tags say: the files are not touched, a rescan doesn't undo them,
 Covers you choose are saved in `scray-data/audio-covers/` and shown by a signed link. Saved (offline) tracks pick up edits
 the next time the app starts online. MusicBrainz is asked by the server at most once a second, and answers are kept a week.
 
+**Bulk MusicBrainz (`bulk-mb.php`, a desktop page; linked from the scan panel).** Start a run and every album (an album tag
+in one folder) is looked up, one at a time: releases whose title is the album's (ignoring "(Remaster)", "[Deluxe]" and the
+like) and whose track count is yours; then the **original** (the oldest release) or the **best match** (MusicBrainz's score),
+as you choose; then the track lengths are checked (8 in 10 within 10 s). A match gets everything: titles, the track artists
+with their collaborators ("feat.", "x", "&" as MusicBrainz credits them), remixers added to a title that doesn't name them,
+numbers, album, album artist, year (first release for "original"), genre, and the cover (the release's, else its release
+group's). Albums it can't be sure of wait for you, with the reason and the candidates: the same title by different artists,
+lengths that don't match, only other track counts, nothing found. In the drawer: **Use this**, search again, Skip, Try again,
+Undo (takes off only what MusicBrainz put on). Optionally each matched album is queued to be written into the files. The run
+lives on the server: the gateway's poll works on it for up to 25 s every 30 s (`SCRAY_MB_BUDGET`), and if the gateway hasn't
+for 90 s an open tab takes the steps itself. About one MusicBrainz request a second, so roughly 15-20 albums a minute.
+
 **Writing edits into the files.** **⇪ Write to files** on an album page (shown once it has edits) lists what would change in
 each file and queues it. The gateway does the writing, and only when `SCRAY_WRITE_TAGS=1` is in `/etc/scray/audio-scan.env`
 (off by default; the scanning sub-account must not be read-only). Every 30 s `scray-audio-scan.py --poll` takes the queue:
@@ -154,7 +166,8 @@ The first save asks for a folder; pick one in Files (On My iPhone is fine). Save
 ```bash
 python3 tests/smoke.py     # needs php, ffmpeg, python3-mutagen, node
 python3 tests/ui_offline.py   # optional: needs `pip install playwright` and a Chromium
-python3 tests/ui_edit.py      # likewise (also ui_library.py, ui_navigate.py)
+python3 tests/bulk_mb.py      # the bulk MusicBrainz matcher (also in CI)
+python3 tests/ui_edit.py      # likewise (also ui_bulk.py, ui_library.py, ui_navigate.py)
 ```
 
 `tests/stub-data/` stands in for Scray's `scray_auth.php` / `scray_secrets.php`. `SCRAY_AUDIO_DATA_DIR`

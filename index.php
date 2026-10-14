@@ -46,6 +46,7 @@ $v = static fn(string $f): string => (string)@filemtime(__DIR__ . '/' . $f);
   <dl id="scannums" class="snums"></dl>
   <div id="scanwarn" class="swarn" hidden></div>
   <div class="sbtns"><button id="scango" type="button" class="primary">Scan library now</button><button id="scanrefresh" type="button" hidden>Refresh this page’s list</button></div>
+  <a id="bulkmb" class="slink" href="bulk-mb.php">MusicBrainz: match the whole library ›</a>
 </section>
 
 <section id="dlpanel" hidden role="dialog" aria-label="Downloads">
