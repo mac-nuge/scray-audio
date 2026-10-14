@@ -135,7 +135,8 @@ final class ScrayAudioSchemeHandler: NSObject, WKURLSchemeHandler {
     private static func mimeType(for ext: String) -> String {
         switch ext.lowercased() {
         case "mp3": return "audio/mpeg"
-        case "m4a", "mp4": return "audio/mp4"
+        case "m4a", "m4b", "mp4": return "audio/mp4"
+        case "aif", "aiff": return "audio/aiff"
         case "aac": return "audio/aac"
         case "flac": return "audio/flac"
         case "ogg", "oga", "opus": return "audio/ogg"

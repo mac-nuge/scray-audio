@@ -76,10 +76,29 @@ try:
 except ImportError:
     sys.exit("mutagen is missing: apt install python3-mutagen")
 
-AUDIO_EXTS = {"mp3", "flac", "m4a", "aac", "ogg", "oga", "opus", "wav"}
+AUDIO_EXTS = {"mp3", "flac", "m4a", "m4b", "aac", "ogg", "oga", "opus", "wav", "aif", "aiff"}
+# Audio the library can't take, and why. They are listed (with the reason) in the page's scan panel.
+OTHER_AUDIO = {
+    "wma": "WMA - browsers and iPhones can't play it (convert to m4a or mp3)",
+    "ape": "Monkey's Audio (APE) - browsers and iPhones can't play it (convert to flac)",
+    "wv": "WavPack - browsers and iPhones can't play it (convert to flac)",
+    "dsf": "DSD - browsers and iPhones can't play it (convert to flac)",
+    "dff": "DSD - browsers and iPhones can't play it (convert to flac)",
+    "mka": "Matroska audio - iPhones can't play it (convert to m4a or flac)",
+    "mpc": "Musepack - browsers and iPhones can't play it",
+    "tta": "True Audio - browsers and iPhones can't play it (convert to flac)",
+    "ra": "RealAudio - browsers and iPhones can't play it", "rm": "RealMedia - browsers and iPhones can't play it",
+    "ac3": "AC-3 - most browsers can't play it", "dts": "DTS - browsers and iPhones can't play it",
+    "amr": "AMR voice audio - browsers can't play it", "caf": "Core Audio (CAF) - only Apple players read it (convert to m4a)",
+    "mid": "MIDI is notes, not recorded sound", "midi": "MIDI is notes, not recorded sound",
+    "mp2": "MPEG-1 Layer II - not all browsers play it (convert to mp3)",
+}
+# Folders that are a NAS's or a computer's own housekeeping, never music: not walked.
+SYSTEM_DIRS = {"@eadir", "@recycle", "@recently-snapshot", "@tmp", "@sharebin", "#recycle", "#snapshot", "$recycle.bin",
+               "system volume information", ".trash", ".trashes", ".spotlight-v100", ".fseventsd", ".appledouble",
+               ".temporaryitems", ".documentrevisions-v100", "lost+found"}
 COVER_RE = re.compile(r"^(cover|folder|front|album|albumart|artwork)(?:[ _-]?\d+)?\.(jpe?g|png)$", re.I)
 COVER_RANK = {"cover": 0, "folder": 1, "front": 2, "album": 3, "albumart": 4, "artwork": 5}
-SKIP_DIR = re.compile(r"^(\.|@|#recycle$|\$RECYCLE\.BIN$|System Volume Information$)", re.I)
 UA = "scray-audio-scan/1.0"
 
 HEAD_START = 256 * 1024      # first read of a file
@@ -164,6 +183,15 @@ def dav_url(path):
 # Walking
 # ---------------------------------------------------------------------------
 
+def href_path(href):
+    """The path of a WebDAV href, taken as it is: a name with ";", "?" or "#" in it stays whole
+    (urlparse / urlsplit would cut it there, as URL params, query or fragment)."""
+    if "://" in href:
+        rest = href.split("://", 1)[1]
+        href = rest[rest.find("/"):] if "/" in rest else "/"
+    return href
+
+
 def propfind(folder):
     """Entries of one folder: [(name, is_dir, size, etag, mtime)]."""
     url = dav_url(folder) + ("/" if folder else "")
@@ -179,7 +207,7 @@ def propfind(folder):
     out = []
     for resp in ET.fromstring(body).findall("d:response", ns):
         href = resp.findtext("d:href", "", ns)
-        path = urllib.parse.unquote(urllib.parse.urlsplit(href).path)
+        path = urllib.parse.unquote(href_path(href))
         if path.rstrip("/") == me:
             continue
         name = path.rstrip("/").rsplit("/", 1)[-1]
@@ -256,6 +284,48 @@ def get_head(path, ext, size):
         n = want
 
 
+ID3_EASY = {"TIT2": "title", "TPE1": "artist", "TPE2": "albumartist", "TALB": "album", "TRCK": "tracknumber",
+            "TPOS": "discnumber", "TDRC": "date", "TYER": "date", "TCON": "genre"}
+
+
+def easy_id3(tags):
+    """WAV and AIFF keep their tags as ID3 frames (TIT2...); give them the names the rest of the code reads."""
+    out = {}
+    for frame, key in ID3_EASY.items():
+        fr = tags.get(frame) if hasattr(tags, "get") else None
+        if fr is not None and getattr(fr, "text", None) and key not in out:
+            out[key] = [str(x) for x in fr.text]
+    return out
+
+
+RIFF_INFO = {b"INAM": "title", b"IART": "artist", b"IAAR": "albumartist", b"IPRD": "album", b"ITRK": "tracknumber",
+             b"IPRT": "tracknumber", b"ICRD": "date", b"IGNR": "genre"}
+
+
+def riff_info(buf):
+    """WAV tags written the Windows way: the RIFF LIST/INFO chunk (mutagen doesn't read it)."""
+    out = {}
+    if buf[:4] != b"RIFF" or buf[8:12] != b"WAVE":
+        return out
+    pos = 12
+    while pos + 8 <= len(buf):
+        cid, size = buf[pos:pos + 4], int.from_bytes(buf[pos + 4:pos + 8], "little")
+        if cid == b"LIST" and buf[pos + 8:pos + 12] == b"INFO":
+            p, end = pos + 12, min(pos + 8 + size, len(buf))
+            while p + 8 <= end:
+                sid, n = buf[p:p + 4], int.from_bytes(buf[p + 4:p + 8], "little")
+                raw = buf[p + 8:p + 8 + n].split(b"\0", 1)[0]
+                if sid in RIFF_INFO and raw.strip():
+                    try:
+                        val = raw.decode("utf-8")
+                    except UnicodeDecodeError:
+                        val = raw.decode("latin-1")
+                    out.setdefault(RIFF_INFO[sid], [val.strip()])
+                p += 8 + n + (n & 1)
+        pos += 8 + size + (size & 1)
+    return out
+
+
 def first(tags, *names):
     for n in names:
         try:
@@ -285,9 +355,12 @@ def open_audio(buf, ext):
     if ext == "flac":
         from mutagen.flac import FLAC
         return FLAC(f)
-    if ext == "m4a":
+    if ext in ("m4a", "m4b"):
         from mutagen.mp4 import MP4
         return MP4(f)
+    if ext in ("aif", "aiff"):
+        from mutagen.aiff import AIFF
+        return AIFF(f)
     if ext in ("ogg", "oga"):
         from mutagen.oggvorbis import OggVorbis
         return OggVorbis(f)
@@ -310,7 +383,9 @@ def read_tags(path, ext, size):
         buf = get_head(path, ext, size)
         audio = open_audio(buf, ext)
         tags = audio.tags or {}
-        if ext == "m4a":
+        if ext in ("wav", "aif", "aiff"):
+            tags = {**(riff_info(buf) if ext == "wav" else {}), **(easy_id3(tags) if tags else {})}
+        if ext in ("m4a", "m4b"):
             def mp4(k):
                 return [str(x).strip() for x in (tags.get(k) or []) if str(x).strip()]
             trkn, disk = (tags.get("trkn") or [(None, 0)])[0], (tags.get("disk") or [(None, 0)])[0]
@@ -365,6 +440,7 @@ class Scan:
         self.errors = 0
         self.folders = 0
         self.complete = True
+        self.not_added = []    # [{path, why, kind}]: audio that didn't go in, and folders that couldn't be read
         self.pool = ThreadPoolExecutor(max_workers=TAG_WORKERS)
         self._last_progress = 0.0
         self._progress_warned = False
@@ -409,19 +485,27 @@ class Scan:
             except Exception as e:  # noqa: BLE001
                 log("cannot list", repr(folder), "-", e)
                 self.complete = False
+                self.not_added.append({"path": folder or "/", "kind": "folder",
+                                       "why": f"couldn't list this folder, so nothing in it was checked ({e})"})
                 continue
             self.folders += 1
             self.progress()
             names = [e[0] for e in entries if not e[1]]
             cover = pick_cover(names)
             for name, is_dir, size, etag, mtime in sorted(entries, key=lambda e: e[0].lower()):
-                if SKIP_DIR.match(name):
-                    continue
                 rel = f"{folder}/{name}" if folder else name
                 if is_dir:
-                    stack.append(rel)
+                    if name.lower() not in SYSTEM_DIRS:
+                        stack.append(rel)
                     continue
-                if name.rsplit(".", 1)[-1].lower() not in AUDIO_EXTS or "." not in name:
+                ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+                if ext not in AUDIO_EXTS and ext not in OTHER_AUDIO:
+                    continue                                   # not audio: pictures, text, playlists...
+                if name.startswith("._"):
+                    self.not_added.append({"path": rel, "kind": "file", "why": "a macOS sidecar file (._), not the music itself - safe to delete"})
+                    continue
+                if ext in OTHER_AUDIO:
+                    self.not_added.append({"path": rel, "kind": "file", "why": OTHER_AUDIO[ext]})
                     continue
                 self.pending.append({"path": rel, "size": size, "etag": etag, "mtime": mtime,
                                      "cover": f"{folder}/{cover}" if cover and folder else cover})
@@ -437,7 +521,8 @@ class Scan:
         partial = bool(ROOT) or bool(MAX_FILES)
         res = api("audio_worker_finish", {"scan_id": self.id, "files_seen": self.seen,
                                           "complete": self.complete and not partial and not error,
-                                          "error": error or ""})
+                                          "error": error or "", "root": ROOT,
+                                          "not_added": self.not_added[:5000], "not_added_total": len(self.not_added)})
         return res
 
 
@@ -445,7 +530,7 @@ class Scan:
 # Writing tags into files (SCRAY_WRITE_TAGS=1)
 # ---------------------------------------------------------------------------
 
-WRITABLE = {"mp3", "flac", "m4a", "ogg", "oga", "opus"}
+WRITABLE = {"mp3", "flac", "m4a", "m4b", "ogg", "oga", "opus"}
 VORBIS = {"title": "title", "artist": "artist", "album_artist": "albumartist", "album": "album",
           "track_no": "tracknumber", "disc_no": "discnumber", "year": "date", "genre": "genre"}
 MP4KEY = {"title": "\xa9nam", "artist": "\xa9ART", "album_artist": "aART", "album": "\xa9alb", "year": "\xa9day", "genre": "\xa9gen"}
@@ -564,7 +649,7 @@ def write_tags(file, ext, changes, cover, drop_art):
                 f["metadata_block_picture"] = [base64.b64encode(pic.write()).decode()]
         f.save()
         return had
-    if ext == "m4a":
+    if ext in ("m4a", "m4b"):
         from mutagen.mp4 import MP4, MP4Cover
         f = MP4(file)
         if f.tags is None:
@@ -611,7 +696,9 @@ def check_written(file, ext, changes):
 def read_tags_buf(buf, ext):
     audio = open_audio(buf, ext)
     tags = audio.tags or {}
-    if ext == "m4a":
+    if ext in ("wav", "aif", "aiff") and tags:
+        tags = easy_id3(tags)
+    if ext in ("m4a", "m4b"):
         def mp4(k):
             return [str(x).strip() for x in (tags.get(k) or []) if str(x).strip()]
         trkn, disk = (tags.get("trkn") or [(None, 0)])[0], (tags.get("disk") or [(None, 0)])[0]
@@ -734,7 +821,7 @@ def main():
         raise
     finally:
         res = scan.finish(err)
-    log(f"done: {scan.seen} files, {scan.tagged} tagged, {scan.errors} tag errors, {res['pruned']} marked gone"
+    log(f"done: {scan.seen} files, {scan.tagged} tagged, {scan.errors} tag errors, {res['pruned']} marked gone, {len(scan.not_added)} not added"
         + (f" ({res['skipped_prune']})" if res.get("skipped_prune") else "")
         + ("" if scan.complete else "  [INCOMPLETE: some folders could not be listed]"))
     return 0 if scan.complete else 2
