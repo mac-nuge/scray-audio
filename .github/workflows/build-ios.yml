@@ -141,6 +141,21 @@ jobs:
           # Swap the source in, then delete IPAs it no longer lists (keeps the last 3 per app).
           remote "cd '$SS_DIR' && mv -f source.json.part source.json && for f in *.ipa; do grep -qxF \"\$f\" .keep || rm -f -- \"\$f\"; done"
           echo "Published build $SS_BUILD ($SS_VERSION) to the SideStore source." >> $GITHUB_STEP_SUMMARY
+          # Check the files are really served: list the folder, then fetch each public link the way SideStore will.
+          LISTING=$(remote "ls -la '$SS_DIR'" 2>&1 | tr '\n' ';' | cut -c1-1500)
+          BAD=0; REPORT=""
+          for f in "$SS_IPA_NAME" "$SS_ICON_NAME" source.json; do
+            R=$(curl -s -L -o /dev/null -w '%{http_code} %{size_download}B %{content_type}' "$SS_BASE_URL/$f" || echo "curl failed")
+            REPORT="$REPORT $f -> $R |"
+            case "$R" in 200*) ;; *) BAD=1 ;; esac
+          done
+          case "$REPORT" in *"$SS_IPA_NAME -> 200 ${SS_IPA_SIZE}B"*) ;; *) BAD=1 ;; esac
+          echo "$REPORT" >> $GITHUB_STEP_SUMMARY
+          if [ "$BAD" = 1 ]; then
+            echo "::error title=SideStore links::$REPORT expected IPA size ${SS_IPA_SIZE}B | folder: $LISTING"
+            exit 1
+          fi
+          echo "::notice title=SideStore links::$REPORT"
       - name: What went wrong (shown as an annotation on the run)
         # The runner's logs can't be downloaded from some places, so on a failure the interesting lines are
         # also written out as an annotation, which the checks API returns.
