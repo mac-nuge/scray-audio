@@ -7,6 +7,11 @@ named `test:` until it has been tried and then `stable:`. Record the reasoning, 
 
 ## Entries
 
+### audio 1.9 — test: lock screen prev next again
+<!-- 2026-10-14T13:30Z -->
+- **Why:** build 14 (audio 1.8) still showed -10s / +10s on the lock screen. Clearing the seek handlers wasn't enough: WebKit drops the page's Media Session handlers when it becomes "now playing" and again whenever playback restarts (first play, each new track), and iOS then falls back to its own +/-10s pair. Ours were only set once, at page load, before anything played, so they were always dropped.
+- **What:** `audio.js` sets the handlers again (previous, next, play, pause, scrub, and seek explicitly `null`) on `play`, `playing`, `loadedmetadata`, each new track, coming back to the page, and `pageshow`. Same approach others used for the same WebKit behaviour (e.g. thecrateapp/crate PR 281). Needs a new IPA. Untested on a phone.
+
 ### audio 1.8 — test: lock screen prev next and go-to panels
 <!-- 2026-10-14T11:55Z -->
 - **Why:** the lock screen and Control Centre showed skip -10s / +10s instead of previous / next track. iOS picks the seek buttons over previous/next whenever `seekbackward` / `seekforward` handlers are registered, and the page registered them (for desktop media keys).
