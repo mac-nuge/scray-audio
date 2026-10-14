@@ -388,6 +388,7 @@
 
   function setMediaSession(t) {
     if (!('mediaSession' in navigator)) return;
+    armMediaSession();
     const meta = (src) => { navigator.mediaSession.metadata = new MediaMetadata({ title: t.title, artist: t.artist, album: t.album, artwork: src ? [{ src, sizes: '512x512' }] : [] }); };
     if (!APP) { meta(t.cover ? new URL(`api.php?action=cover&t=${t.id}`, location.href).href : null); return; }
     meta(null);                                                  // the app: the lock screen gets the cover once its signed link is back
@@ -397,17 +398,25 @@
       else api('cover_url', { t: t.id }).then(j => { if (P.queue[P.idx] === t) meta(j.url); }).catch(() => {});
     }
   }
-  if ('mediaSession' in navigator) {
+  // The lock screen's buttons. WebKit drops these when the page becomes "now playing" and again each time playback
+  // restarts (first play, a new track), and then iOS shows its own -10s / +10s pair. So they are set again at each of
+  // those moments, not just once at load. No seekbackward / seekforward: with those, iOS shows +/-10s instead of
+  // previous / next.
+  function armMediaSession() {
+    if (!('mediaSession' in navigator)) return;
     const set = (a, f) => { try { navigator.mediaSession.setActionHandler(a, f); } catch (e) { /* unsupported action */ } };
     set('play', () => togglePlay());
     set('pause', () => audio.pause());
     set('previoustrack', prev);
     set('nexttrack', () => next(false));
-    // No seekbackward/seekforward: iOS shows +/-10s on the lock screen whenever those exist, in place of previous/next.
     set('seekbackward', null);
     set('seekforward', null);
     set('seekto', d => { if (d && d.seekTime != null) audio.currentTime = d.seekTime; });
   }
+  armMediaSession();
+  ['play', 'playing', 'loadedmetadata'].forEach(ev => audio.addEventListener(ev, armMediaSession));
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) armMediaSession(); });
+  window.addEventListener('pageshow', armMediaSession);
 
   // ------------------------------------------------------------ queue panel
   function renderQueue() {
