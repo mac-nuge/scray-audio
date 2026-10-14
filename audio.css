@@ -403,3 +403,10 @@ input[type="range"]::-moz-range-thumb { width: 14px; height: 14px; border-radius
 .sa-row button { flex: 1; padding: 11px; border-radius: 8px; font: inherit; font-weight: 700; cursor: pointer; }
 .sa-go { background: var(--accent); border: 0; color: #06282a; }
 .sa-later { background: transparent; border: 1px solid var(--line); color: var(--text); }
+
+/* ---- swiping between tabs (audio.js) */
+@keyframes swl { from { transform: translateX(28px); opacity: .4; } to { transform: none; opacity: 1; } }
+@keyframes swr { from { transform: translateX(-28px); opacity: .4; } to { transform: none; opacity: 1; } }
+#view.swl { animation: swl .18s ease-out; }
+#view.swr { animation: swr .18s ease-out; }
+@media (prefers-reduced-motion: reduce) { #view.swl, #view.swr { animation: none; } }

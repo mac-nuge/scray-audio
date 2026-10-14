@@ -1165,6 +1165,35 @@
   }
   window.addEventListener('hashchange', route);
 
+  // Phone: swipe left / right on the page to move between the tabs (Results when searching, Folders … Playlists).
+  // Only a clear sideways swipe counts; it leaves alone anything that scrolls sideways or drags (the tab strip,
+  // the letters, sliders), the menus and panels, and inputs.
+  (() => {
+    let x0 = 0, y0 = 0, t0 = 0, live = false;
+    const SKIP = '#tabs, .jump, input, textarea, select, .cmenu, .mback, .dback, .sa-veil, #queuepanel, #dlpanel, #scanpanel, #player';
+    const tabs = () => [...document.querySelectorAll('#tabs a')].filter(a => !a.hidden);
+    document.addEventListener('touchstart', e => {
+      live = e.touches.length === 1 && !(e.target.closest && e.target.closest(SKIP)) && !menu.el;
+      if (!live) return;
+      x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; t0 = Date.now();
+    }, { passive: true });
+    document.addEventListener('touchmove', e => { if (live && e.touches.length !== 1) live = false; }, { passive: true });
+    document.addEventListener('touchend', e => {
+      if (!live) return;
+      live = false;
+      const t = e.changedTouches[0], dx = t.clientX - x0, dy = t.clientY - y0;
+      if (Date.now() - t0 > 700 || Math.abs(dx) < 70 || Math.abs(dy) > Math.abs(dx) * 0.5) return;
+      const list = tabs(), cur = list.findIndex(a => a.classList.contains('on'));
+      if (cur < 0) return;                                   // a page that isn't under a tab
+      const next = list[cur + (dx < 0 ? 1 : -1)];
+      if (!next) return;
+      view.classList.remove('swl', 'swr'); void view.offsetWidth;
+      view.classList.add(dx < 0 ? 'swl' : 'swr');
+      location.hash = next.getAttribute('href');
+      next.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }, { passive: true });
+  })();
+
   // search box. The term stays as you move between the tabs (Artists, Albums, Genres, Playlists, Folders), and
   // each shows what matches it; "Results" has everything. Typing on one of those tabs filters it in place;
   // anywhere else it goes to Results. Emptying the box shows everything again.

@@ -99,7 +99,7 @@ try:
 
             # 4. the search term carries across the tabs
             pg.goto(PAGE + "#/"); pg.wait_for_selector(".folder")
-            pg.fill("#search", "one"); pg.wait_for_function("location.hash === '#/search/one'", timeout=3000)
+            pg.fill("#search", "one"); pg.wait_for_function("location.hash === '#/search/one'", timeout=3000); pg.wait_for_selector("#view h1.title:has-text('one')")
             chk("typing goes to the results", "Artist One" in pg.inner_text("#view") and pg.is_visible("#tabres"))
             tap("#tabs a[data-tab=artists]"); pg.wait_for_timeout(500)
             arts = pg.evaluate("[...document.querySelectorAll('#view .item .nm')].map(e => e.textContent)")
@@ -119,6 +119,27 @@ try:
             tap("#tabs a[data-tab=albums]"); pg.wait_for_timeout(400)
             tap(".fnote .lnk"); pg.wait_for_timeout(500)
             chk("Show all clears the term", pg.input_value("#search") == "" and not pg.is_visible("#tabres") and len(pg.query_selector_all("#view .card")) == 3)
+            if mobile:
+                swipe = """([dx, sel]) => { const el = document.querySelector(sel || '#view'); const r = el.getBoundingClientRect();
+                  const x = r.left + r.width / 2, y = r.top + Math.min(r.height / 2, 200);
+                  const mk = (cx) => new Touch({ identifier: 1, target: el, clientX: cx, clientY: y });
+                  el.dispatchEvent(new TouchEvent('touchstart', { touches: [mk(x)], changedTouches: [mk(x)], bubbles: true }));
+                  el.dispatchEvent(new TouchEvent('touchend', { touches: [], changedTouches: [mk(x + dx)], bubbles: true })); }"""
+                pg.goto(PAGE + "#/artists"); pg.wait_for_selector("#view .item")
+                pg.evaluate(swipe, [-150, None]); pg.wait_for_timeout(500)
+                chk("swipe left: the next tab", pg.evaluate("location.hash") == "#/albums")
+                pg.evaluate(swipe, [150, None]); pg.wait_for_timeout(500)
+                pg.evaluate(swipe, [150, None]); pg.wait_for_timeout(500)
+                chk("swipe right twice: back two tabs", pg.evaluate("location.hash") == "#/")
+                pg.evaluate(swipe, [150, None]); pg.wait_for_timeout(300)
+                chk("nothing before the first tab", pg.evaluate("location.hash") == "#/")
+                pg.evaluate(swipe, [-30, None]); pg.wait_for_timeout(300)
+                chk("a small drag isn't a swipe", pg.evaluate("location.hash") == "#/")
+                pg.evaluate(swipe, [-150, "#tabs"]); pg.wait_for_timeout(300)
+                chk("swiping the tab strip scrolls it, doesn't switch", pg.evaluate("location.hash") == "#/")
+                pg.fill("#search", "one"); pg.wait_for_timeout(700)
+                pg.evaluate(swipe, [-150, None]); pg.wait_for_timeout(500)
+                chk("with a search term, Results comes first and swipes on to Folders", pg.evaluate("location.hash") == "#/" and pg.input_value("#search") == "one")
             chk("no page errors", errs == [], errs)
             b.close()
 finally:
