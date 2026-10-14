@@ -184,7 +184,8 @@
   const COVER_DIR = '.covers/';
   const S = { tracks: new Map(), folder: null, ready: false, jobs: new Map(), listeners: new Set(), saveTimer: 0, tick: 0, running: 0 };
   const MAX_AT_ONCE = 3;                                                            // ⚙️ downloads running together
-  const coverName = folder => (folder || '_').replace(/[\/\\:]/g, '~') + '.jpg';
+  // A cover chosen in the library (coverv not 'f') gets its own name, so changing it fetches the new picture.
+  const coverName = (folder, v) => (folder || '_').replace(/[\/\\:]/g, '~') + (v && v !== 'f' ? '@' + v : '') + '.jpg';
   const urlFor = rel => 'scray-audio://local/' + rel.split('/').map(encodeURIComponent).join('/');
 
   function changed(now) {
@@ -233,7 +234,7 @@
       await call('download', { key: 't' + t.id, url: await ctx.getUrl(t), path: t.path });
       const entry = { ...t };
       if (t.cover) {
-        const cf = coverName(t.folder);
+        const cf = coverName(t.folder, t.coverv);
         const have = [...S.tracks.values()].some(x => x.cf === cf);
         if (!have && ctx.getCoverUrl) {
           try { await call('download', { key: 'c' + t.id, url: await ctx.getCoverUrl(t), path: COVER_DIR + cf }); entry.cf = cf; } catch (e) { /* no cover is fine */ }
@@ -306,6 +307,40 @@
       saveSoon(); changed(true);
       await call('remove', { paths: paths.concat(orphan) }).catch(() => {});
       return gone.length;
+    },
+    /**
+     * Newer details from the library for saved tracks (an edit, a new cover): the saved copy takes them on.
+     * The music file stays as it is; a changed cover is fetched, and a cover no longer used is removed.
+     */
+    async refresh(fresh, ctx) {
+      let n = 0;
+      const want = [], dropped = new Set();
+      for (const t of fresh || []) {
+        const old = S.tracks.get(t.id);
+        if (!old || old.path !== t.path) continue;
+        const cf = t.cover ? coverName(t.folder, t.coverv) : null;
+        const next = { ...old, ...t, cf: old.cf };
+        if ((cf || null) !== (old.cf || null)) {
+          if (old.cf) dropped.add(old.cf);
+          next.cf = null;
+          if (cf) want.push([next, cf]);
+        }
+        const keys = ['title', 'artist', 'albumArtist', 'album', 'no', 'disc', 'year', 'genre', 'coverv', 'cover', 'edited', 'cf'];
+        if (keys.some(k => (next[k] ?? null) !== (old[k] ?? null))) { S.tracks.set(t.id, next); n++; }
+      }
+      for (const [entry, cf] of want) {
+        const have = [...S.tracks.values()].some(x => x !== entry && x.cf === cf);
+        if (have) { entry.cf = cf; continue; }
+        if (!ctx || !ctx.getCoverUrl) continue;
+        try { await call('download', { key: 'c' + entry.id, url: await ctx.getCoverUrl(entry), path: COVER_DIR + cf }); entry.cf = cf; } catch (e) { /* no cover is fine */ }
+      }
+      if (n) {
+        const used = new Set([...S.tracks.values()].map(t => t.cf).filter(Boolean));
+        const orphan = [...dropped].filter(cf => !used.has(cf)).map(cf => COVER_DIR + cf);
+        if (orphan.length) call('remove', { paths: orphan }).catch(() => {});
+        saveSoon(); changed(true);
+      }
+      return n;
     },
     cancel(id) { const j = S.jobs.get(id); if (j && (j.state === 'queued' || j.state === 'active')) { if (j.state === 'queued') { j.state = 'cancelled'; changed(true); } else call('cancel', { key: 't' + id }).catch(() => {}); } },
     cancelAll() { for (const id of S.jobs.keys()) this.cancel(id); },

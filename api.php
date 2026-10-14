@@ -33,7 +33,7 @@ $action = (string)($_GET['action'] ?? '');
 
 header('X-Robots-Tag: noindex, nofollow');
 header('Cache-Control: no-store');
-if ($action !== 'cover') {
+if ($action !== 'cover' && $action !== 'art') {
     header('Content-Type: application/json; charset=utf-8');
     // A whole-library queue is a few MB of repetitive JSON; gzip it.
     if (!ini_get('zlib.output_compression') && extension_loaded('zlib')
@@ -83,6 +83,24 @@ function audioDeviceKeyOk(string $key): bool {
         if (is_array($d) && hash_equals((string)($d['hash'] ?? ''), $want)) return true;
     }
     return false;
+}
+
+// ---- art: a cover you chose, by signed link (an app <img> can't send the key) ----
+if ($action === 'art') {
+    $f = (string)($_GET['f'] ?? ''); $e = (int)($_GET['e'] ?? 0); $sig = (string)($_GET['s'] ?? '');
+    if (!preg_match('/^[0-9a-f]{40}\.(jpg|png|webp)$/', $f) || $e < time() || !hash_equals(artSig($secrets, $f, $e), $sig)) {
+        http_response_code(403); header('Content-Type: text/plain'); echo 'bad or old link'; exit;
+    }
+    $file = AUDIO_COVERS_DIR . '/' . $f;
+    if (!is_file($file)) { http_response_code(404); header('Content-Type: text/plain'); echo 'no such cover'; exit; }
+    header('Content-Type: ' . ['jpg' => 'image/jpeg', 'png' => 'image/png', 'webp' => 'image/webp'][pathinfo($f, PATHINFO_EXTENSION)]);
+    header('Cache-Control: private, max-age=86400, immutable');   // the name is the content's hash
+    header('Content-Length: ' . filesize($file));
+    readfile($file);
+    exit;
+}
+function artSig(array $secrets, string $f, int $e): string {
+    return hash_hmac('sha256', "scray-audio-art|$f|$e", (string)($secrets['hetzner_secret'] ?? '') . '|art');
 }
 
 $isWorker = false;
@@ -223,6 +241,39 @@ SQL);
         else run($db, "INSERT INTO playlists(name, kind, created_at, updated_at) VALUES ('Liked', 'liked', :t, :t)", [':t' => $now]);
         $db->exec('PRAGMA user_version = 4');
         $db->commit();
+        $ver = 4;
+    }
+    if ($ver < 5) {
+        // Edits. The tracks' title/artist/... columns become "what to show": the file's own tags (kept in
+        // file_tags) with your edits (track_edits) on top. A rescan rewrites file_tags only, so edits stay.
+        $db->beginTransaction();
+        foreach (['file_tags TEXT', 'cover_custom TEXT', 'mb_release TEXT', 'mb_recording TEXT', 'edited INTEGER NOT NULL DEFAULT 0'] as $col) {
+            $db->exec("ALTER TABLE tracks ADD COLUMN $col");
+        }
+        $db->exec(<<<'SQL'
+CREATE TABLE IF NOT EXISTS track_edits (
+  track_id  INTEGER NOT NULL,
+  field     TEXT NOT NULL,         -- title, artist, album_artist, album, track_no, disc_no, year, genre, cover, mb_release, mb_recording
+  value     TEXT,
+  source    TEXT,                  -- manual | musicbrainz
+  edited_at TEXT,
+  PRIMARY KEY (track_id, field)
+);
+CREATE TABLE IF NOT EXISTS mb_cache (url TEXT PRIMARY KEY, body TEXT, fetched_at INTEGER);
+SQL);
+        // Until now the columns held the file's tags as they were, so they become file_tags as they are.
+        $up = $db->prepare('UPDATE tracks SET file_tags = :j WHERE id = :i');
+        foreach ($db->query('SELECT id, title, artist, album_artist, album, track_no, disc_no, year, genre FROM tracks WHERE tagged = 1')->fetchAll() as $r) {
+            $aa = (string)$r['album_artist'];
+            if ($aa === (string)$r['artist'] || $aa === 'Unknown artist') $aa = '';     // was a stand-in, not a tag
+            $up->execute([':i' => (int)$r['id'], ':j' => json_encode([
+                'title' => (string)($r['title'] ?? ''), 'artist' => (string)$r['artist'], 'album_artist' => $aa, 'album' => (string)$r['album'],
+                'track_no' => $r['track_no'] === null ? null : (int)$r['track_no'], 'disc_no' => $r['disc_no'] === null ? null : (int)$r['disc_no'],
+                'year' => $r['year'] === null ? null : (int)$r['year'], 'genre' => (string)$r['genre'],
+            ], JSON_UNESCAPED_UNICODE)]);
+        }
+        $db->exec('PRAGMA user_version = 5');
+        $db->commit();
     }
     return $db;
 }
@@ -282,7 +333,9 @@ function cleanPath(string $p): string {
     return preg_replace('#/+#', '/', $p);
 }
 
-const TRACK_COLS = 'id, title, artist, album_artist, album, track_no, disc_no, year, genre, duration_ms, ext, folder, filename, path, size, (cover IS NOT NULL) AS has_cover';
+const TRACK_COLS = 'id, title, artist, album_artist, album, track_no, disc_no, year, genre, duration_ms, ext, folder, filename, path, size, (cover IS NOT NULL OR cover_custom IS NOT NULL) AS has_cover, cover_custom, edited';
+/** Has art: the folder's or one you chose. */
+const HAS_ART = '(cover IS NOT NULL OR cover_custom IS NOT NULL)';
 
 /** One track as the page wants it. Missing tags fall back to the file name. */
 function shapeTrack(array $r): array {
@@ -304,6 +357,9 @@ function shapeTrack(array $r): array {
         'path'  => (string)$r['path'],
         'size'  => $r['size'] === null ? null : (int)$r['size'],
         'cover' => (bool)$r['has_cover'],
+        // which art: changes when you pick another cover, so a saved copy on the phone knows to fetch it again
+        'coverv' => ($r['cover_custom'] ?? null) ? substr((string)$r['cover_custom'], 0, 12) : ((bool)$r['has_cover'] ? 'f' : ''),
+        'edited' => !empty($r['edited']),
     ];
 }
 
@@ -516,6 +572,185 @@ function plTracks(PDO $db, int $pl): array {
     return [$tracks, $missing];
 }
 
+// ---- covers ------------------------------------------------------------
+/** This api.php's own address, for links the app opens from elsewhere. */
+function selfUrl(): string {
+    $https = (($_SERVER['HTTPS'] ?? '') !== '' && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https');
+    return ($https ? 'https' : 'http') . '://' . ($_SERVER['HTTP_HOST'] ?? 'localhost') . ($_SERVER['SCRIPT_NAME'] ?? '/api.php');
+}
+/** A signed link to a track's art: the cover you chose if any, else the folder's (via the gateway). */
+function coverLink(PDO $db, array $secrets, int $id): ?string {
+    $r = run($db, 'SELECT cover, cover_custom FROM tracks WHERE id = :i AND deleted = 0', [':i' => $id])->fetch();
+    if (!$r) return null;
+    if ($r['cover_custom']) {
+        $e = time() + max(600, audioTtl($secrets));
+        $f = (string)$r['cover_custom'];
+        return selfUrl() . '?action=art&f=' . rawurlencode($f) . '&e=' . $e . '&s=' . artSig($secrets, $f, $e);
+    }
+    return $r['cover'] ? audioSignedUrl($secrets, (string)$r['cover']) : null;
+}
+/** Keep an image you chose. Named by its content, so the same picture is stored once. Returns the file name. */
+function storeCover(string $bytes): string {
+    if (strlen($bytes) > 10 * 1024 * 1024) fail(400, 'that picture is too big (10 MB at most)');
+    $info = @getimagesizefromstring($bytes);
+    $ext = [IMAGETYPE_JPEG => 'jpg', IMAGETYPE_PNG => 'png', IMAGETYPE_WEBP => 'webp'][$info[2] ?? 0] ?? null;
+    if (!$info || $ext === null) fail(400, 'that is not a JPEG, PNG or WebP picture');
+    if (!is_dir(AUDIO_COVERS_DIR) && !@mkdir(AUDIO_COVERS_DIR, 0755, true)) fail(500, 'could not make the covers folder');
+    $name = sha1($bytes) . '.' . $ext;
+    $file = AUDIO_COVERS_DIR . '/' . $name;
+    if (!is_file($file)) {
+        $tmp = $file . '.' . bin2hex(random_bytes(4));
+        if (@file_put_contents($tmp, $bytes) !== strlen($bytes) || !@rename($tmp, $file)) { @unlink($tmp); fail(500, 'could not save the cover'); }
+    }
+    return $name;
+}
+
+// ---- edits: the file's tags (file_tags) with yours on top (track_edits) ---
+const EDIT_TEXT = ['title' => 300, 'artist' => 300, 'album_artist' => 300, 'album' => 300, 'genre' => 120];
+const EDIT_INT  = ['track_no' => 999, 'disc_no' => 99, 'year' => 9999];
+const EDIT_META = ['cover', 'mb_release', 'mb_recording'];
+
+/** Work out what to show for these tracks from their file tags and edits, and store it. */
+function trackApply(PDO $db, array $ids): void {
+    $ids = array_values(array_unique(array_map('intval', $ids)));
+    if (!$ids) return;
+    $up = $db->prepare('UPDATE tracks SET title = :title, artist = :artist, album_artist = :aa, album = :album, track_no = :no,
+                          disc_no = :disc, year = :year, genre = :genre, cover_custom = :cc, mb_release = :rel, mb_recording = :rec,
+                          edited = :ed, search = :search WHERE id = :id');
+    foreach (array_chunk($ids, 400) as $chunk) {
+        $in = implode(',', array_fill(0, count($chunk), '?'));
+        $edits = [];
+        foreach (run($db, "SELECT track_id, field, value FROM track_edits WHERE track_id IN ($in)", $chunk)->fetchAll() as $e) {
+            $edits[(int)$e['track_id']][(string)$e['field']] = $e['value'];
+        }
+        foreach (run($db, "SELECT id, path, file_tags FROM tracks WHERE id IN ($in)", $chunk)->fetchAll() as $r) {
+            $id = (int)$r['id'];
+            $f = json_decode((string)($r['file_tags'] ?? ''), true) ?: [];
+            $e = $edits[$id] ?? [];
+            $pick = static fn(string $k) => array_key_exists($k, $e) ? $e[$k] : ($f[$k] ?? null);
+            $str = static fn($v): string => trim((string)($v ?? ''));
+            $int = static fn($v): ?int => ($v === null || $v === '' || !is_numeric($v) || (int)$v <= 0) ? null : (int)$v;
+            $title = $str($pick('title')); $artist = $str($pick('artist')); $album = $str($pick('album'));
+            $aa = $str($pick('album_artist'));
+            if ($aa === '') $aa = $artist;
+            if ($aa === '') $aa = 'Unknown artist';
+            $shown = array_diff_key($e, array_flip(['mb_release', 'mb_recording']));
+            $up->execute([
+                ':id' => $id, ':title' => $title === '' ? null : $title, ':artist' => $artist, ':aa' => $aa, ':album' => $album,
+                ':no' => $int($pick('track_no')), ':disc' => $int($pick('disc_no')), ':year' => $int($pick('year')),
+                ':genre' => $str($pick('genre')), ':cc' => ($e['cover'] ?? null) ?: null,
+                ':rel' => $e['mb_release'] ?? null, ':rec' => $e['mb_recording'] ?? null, ':ed' => $shown ? 1 : 0,
+                ':search' => foldText(implode(' ', [$title, $artist, $aa, $album, (string)$r['path']])),
+            ]);
+        }
+    }
+}
+
+/** Set (or with null, clear) fields on one track. A value the same as the file's tag clears the edit too. */
+function trackEdit(PDO $db, int $id, array $set, string $source): void {
+    $row = run($db, 'SELECT file_tags FROM tracks WHERE id = :i AND deleted = 0', [':i' => $id])->fetch();
+    if (!$row) fail(404, "no such track ($id)");
+    $file = json_decode((string)($row['file_tags'] ?? ''), true) ?: [];
+    $put = $db->prepare('INSERT INTO track_edits(track_id, field, value, source, edited_at) VALUES (:t, :f, :v, :s, :a)
+                         ON CONFLICT(track_id, field) DO UPDATE SET value = excluded.value, source = excluded.source, edited_at = excluded.edited_at');
+    $del = $db->prepare('DELETE FROM track_edits WHERE track_id = :t AND field = :f');
+    foreach ($set as $field => $v) {
+        $field = (string)$field;
+        if (isset(EDIT_TEXT[$field])) {
+            if ($v !== null) $v = mb_substr(trim(preg_replace('/\s+/u', ' ', (string)$v)), 0, EDIT_TEXT[$field], 'UTF-8');
+            $same = $v !== null && $v === trim((string)($file[$field] ?? ''));
+        } elseif (isset(EDIT_INT[$field])) {
+            if ($v !== null) {
+                if ($v === '' ) $v = '';
+                elseif (!is_numeric($v) || (int)$v < 1 || (int)$v > EDIT_INT[$field]) fail(400, "$field should be a number from 1 to " . EDIT_INT[$field]);
+                else $v = (string)(int)$v;
+            }
+            $fv = $file[$field] ?? null;
+            $same = $v !== null && $v === ($fv === null ? '' : (string)(int)$fv);
+        } elseif (in_array($field, EDIT_META, true)) {
+            if ($v !== null) $v = substr((string)$v, 0, 100);
+            $same = false;
+        } else {
+            fail(400, "can't edit $field");
+        }
+        if ($v === null || $same) $del->execute([':t' => $id, ':f' => $field]);
+        else $put->execute([':t' => $id, ':f' => $field, ':v' => $v, ':s' => $source, ':a' => gmdate('c')]);
+    }
+}
+
+function shapeById(PDO $db, array $ids): array {
+    $out = [];
+    foreach (array_chunk(array_values(array_unique(array_map('intval', $ids))), 400) as $chunk) {
+        $in = implode(',', array_fill(0, count($chunk), '?'));
+        foreach (run($db, 'SELECT ' . TRACK_COLS . " FROM tracks WHERE deleted = 0 AND id IN ($in)", $chunk)->fetchAll() as $r) $out[(int)$r['id']] = shapeTrack($r);
+    }
+    $sorted = [];
+    foreach ($ids as $i) if (isset($out[(int)$i])) $sorted[] = $out[(int)$i];
+    return $sorted;
+}
+
+// ---- MusicBrainz + the Cover Art Archive ----------------------------------
+// About one request a second, and every request says who we are (their rules). Answers are kept a week.
+function mbUserAgent(array $secrets): string {
+    $c = (string)($secrets['musicbrainz_contact'] ?? '') ?: 'https://github.com/mac-nuge/scray-audio';
+    return "ScrayAudio/1.12 ( $c )";
+}
+/** GET a URL. Returns [status, body, content-type]. */
+function httpGet(string $url, string $ua, string $accept, int $timeout = 20): array {
+    if (function_exists('curl_init')) {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true, CURLOPT_MAXREDIRS => 5,
+            CURLOPT_TIMEOUT => $timeout, CURLOPT_CONNECTTIMEOUT => 8, CURLOPT_USERAGENT => $ua, CURLOPT_HTTPHEADER => ['Accept: ' . $accept]]);
+        $body = curl_exec($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        $type = (string)curl_getinfo($ch, CURLINFO_CONTENT_TYPE);
+        curl_close($ch);
+        return [$body === false ? 0 : $code, $body === false ? '' : (string)$body, $type];
+    }
+    $ctx = stream_context_create(['http' => ['header' => "User-Agent: $ua\r\nAccept: $accept\r\n", 'timeout' => $timeout, 'ignore_errors' => true, 'follow_location' => 1, 'max_redirects' => 5]]);
+    $body = @file_get_contents($url, false, $ctx);
+    $code = 0; $type = '';
+    foreach ($http_response_header ?? [] as $hl) {
+        if (preg_match('#^HTTP/\S+\s+(\d+)#', $hl, $m)) $code = (int)$m[1];
+        elseif (stripos($hl, 'content-type:') === 0) $type = trim(substr($hl, 13));
+    }
+    return [$body === false ? 0 : $code, $body === false ? '' : (string)$body, $type];
+}
+/** A MusicBrainz web-service call (path under /ws/2), cached, at most one a second across all requests. */
+function mbGet(PDO $db, array $secrets, string $path, array $q): array {
+    $q['fmt'] = 'json';
+    $url = AUDIO_MB_BASE . '/' . ltrim($path, '/') . '?' . http_build_query($q, '', '&', PHP_QUERY_RFC3986);
+    $hit = run($db, 'SELECT body FROM mb_cache WHERE url = :u AND fetched_at > :t', [':u' => $url, ':t' => time() - 7 * 86400])->fetchColumn();
+    if ($hit !== false) return json_decode((string)$hit, true) ?: [];
+    $lock = @fopen(SCRAY_DATA_DIR . '/audio-mb.lock', 'c');
+    if ($lock) flock($lock, LOCK_EX);
+    try {
+        $last = (float)(metaGet($db, 'mb_last') ?? 0);
+        $wait = $last + 1.1 - microtime(true);
+        if ($wait > 0) usleep((int)($wait * 1e6));
+        [$code, $body] = httpGet($url, mbUserAgent($secrets), 'application/json');
+        metaSet($db, 'mb_last', (string)microtime(true));
+    } finally {
+        if ($lock) { flock($lock, LOCK_UN); fclose($lock); }
+    }
+    if ($code === 503) fail(503, 'MusicBrainz is busy - try again in a few seconds');
+    if ($code === 404) fail(404, 'MusicBrainz doesn’t know that one');
+    if ($code !== 200) fail(502, $code ? "MusicBrainz answered $code" : 'couldn’t reach MusicBrainz');
+    $j = json_decode($body, true);
+    if (!is_array($j)) fail(502, 'MusicBrainz sent something unreadable');
+    run($db, 'INSERT INTO mb_cache(url, body, fetched_at) VALUES (:u, :b, :t) ON CONFLICT(url) DO UPDATE SET body = excluded.body, fetched_at = excluded.fetched_at',
+        [':u' => $url, ':b' => $body, ':t' => time()]);
+    return $j;
+}
+function mbCredit($credits): string {
+    $s = '';
+    foreach ((array)$credits as $c) $s .= (string)($c['name'] ?? ($c['artist']['name'] ?? '')) . (string)($c['joinphrase'] ?? '');
+    return trim($s);
+}
+function mbLucene(string $s): string {
+    return '"' . str_replace(['\\', '"'], ['\\\\', '\\"'], trim($s)) . '"';
+}
+
 // ---- scan status -------------------------------------------------------
 // A scan is "running" while its heartbeat is fresh; one that stopped updating
 // without finishing is "stale" (the scanner crashed or the gateway went away).
@@ -601,7 +836,7 @@ case 'ls': {
     $folders = [];
     foreach ($seg as $name => $c) $folders[] = ['name' => (string)$name, 'path' => $prefix . $name, 'tracks' => $c];
 
-    $art = run($db, 'SELECT id FROM tracks WHERE deleted = 0 AND folder = :f AND cover IS NOT NULL LIMIT 1', [':f' => $path])->fetchColumn();
+    $art = run($db, 'SELECT id FROM tracks WHERE deleted = 0 AND folder = :f AND (cover IS NOT NULL OR cover_custom IS NOT NULL) LIMIT 1', [':f' => $path])->fetchColumn();
     jsonOut(['ok' => true, 'path' => $path, 'folders' => $folders, 'tracks' => $tracks,
              'art' => $art === false ? null : (int)$art, 'total' => count($tracks) + array_sum($seg)]);
 }
@@ -622,7 +857,7 @@ case 'tracks': {
 // ---- artists / albums / genres: the metadata views --------------------
 case 'artists': {
     $rows = run($db, "SELECT album_artist AS name, COUNT(DISTINCT album) albums, COUNT(*) tracks,
-                             MIN(CASE WHEN cover IS NOT NULL THEN id END) art
+                             MIN(CASE WHEN cover IS NOT NULL OR cover_custom IS NOT NULL THEN id END) art
                         FROM tracks WHERE deleted = 0 GROUP BY album_artist")->fetchAll();
     usort($rows, static fn($a, $b) => strcmp(nameSortKey((string)$a['name']), nameSortKey((string)$b['name'])));
     jsonOut(['ok' => true, 'artists' => array_map(static fn($r) => [
@@ -638,7 +873,7 @@ case 'albums': {
     else { $w[] = "album <> ''"; }                // the grid is real albums; an artist page also shows the loose tracks
     $rows = run($db, "SELECT album_artist AS artist, album, MAX(year) year, COUNT(*) tracks,
                              COALESCE(SUM(duration_ms), 0) ms,
-                             MIN(CASE WHEN cover IS NOT NULL THEN id END) art
+                             MIN(CASE WHEN cover IS NOT NULL OR cover_custom IS NOT NULL THEN id END) art
                         FROM tracks WHERE " . implode(' AND ', $w) . " GROUP BY album_artist, album", $p)->fetchAll();
     usort($rows, static function ($a, $b) {
         $c = strcmp(nameSortKey((string)$a['artist']), nameSortKey((string)$b['artist']));
@@ -672,7 +907,7 @@ case 'search': {
         static fn($r) => str_contains(foldText((string)$r['name']), $fq)));
     $albums = array_values(array_filter(
         run($db, "SELECT album_artist AS artist, album, MAX(year) year, COUNT(*) tracks,
-                         MIN(CASE WHEN cover IS NOT NULL THEN id END) art
+                         MIN(CASE WHEN cover IS NOT NULL OR cover_custom IS NOT NULL THEN id END) art
                     FROM tracks WHERE deleted = 0 AND album <> '' GROUP BY album_artist, album")->fetchAll(),
         static fn($r) => str_contains(foldText((string)$r['album']), $fq)));
     jsonOut(['ok' => true,
@@ -700,18 +935,18 @@ case 'url': {
 // for the signed link and uses that as the image address.
 case 'cover_url': {
     $id = (int)($_GET['t'] ?? 0);
-    $c = run($db, 'SELECT cover FROM tracks WHERE id = :i AND deleted = 0 AND cover IS NOT NULL', [':i' => $id])->fetchColumn();
-    if ($c === false || $c === null) fail(404, 'no cover');
-    jsonOut(['ok' => true, 'url' => audioSignedUrl($secrets, (string)$c), 'expires_in' => max(60, audioTtl($secrets) - 300)]);
+    $u = coverLink($db, $secrets, $id);
+    if ($u === null) fail(404, 'no cover');
+    jsonOut(['ok' => true, 'url' => $u, 'expires_in' => max(60, audioTtl($secrets) - 300)]);
 }
 
 case 'cover': {
     $id = (int)($_GET['t'] ?? 0);
-    $c = run($db, 'SELECT cover FROM tracks WHERE id = :i AND deleted = 0 AND cover IS NOT NULL', [':i' => $id])->fetchColumn();
-    if ($c === false || $c === null) { http_response_code(404); header('Content-Type: text/plain'); echo 'no cover'; exit; }
+    $u = coverLink($db, $secrets, $id);
+    if ($u === null) { http_response_code(404); header('Content-Type: text/plain'); echo 'no cover'; exit; }
     $keep = max(60, audioTtl($secrets) - 300);          // the redirect must not outlive the link it points at
     header('Cache-Control: private, max-age=' . $keep);
-    header('Location: ' . audioSignedUrl($secrets, (string)$c), true, 302);
+    header('Location: ' . $u, true, 302);
     exit;
 }
 
@@ -734,7 +969,7 @@ case 'playlists': {
                              COUNT(t.id) AS tracks, COALESCE(SUM(t.duration_ms), 0) AS ms,
                              COUNT(i.id) - COUNT(t.id) AS missing,
                              (SELECT t2.id FROM playlist_items i2 JOIN tracks t2 ON t2.id = i2.track_id
-                               WHERE i2.playlist_id = p.id AND t2.deleted = 0 AND t2.cover IS NOT NULL
+                               WHERE i2.playlist_id = p.id AND t2.deleted = 0 AND (t2.cover IS NOT NULL OR t2.cover_custom IS NOT NULL)
                                ORDER BY i2.pos LIMIT 1) AS art
                         FROM playlists p
                         LEFT JOIN playlist_items i ON i.playlist_id = p.id
@@ -755,6 +990,146 @@ case 'playlist': {
     foreach ($tracks as $t) { $ms += (int)($t['ms'] ?? 0); if ($art === null && $t['cover']) $art = $t['id']; }
     jsonOut(['ok' => true, 'playlist' => ['id' => (int)$pl['id'], 'name' => (string)$pl['name'], 'liked' => ($pl['kind'] ?? null) === 'liked', 'tracks' => count($tracks), 'ms' => $ms, 'missing' => $missing, 'art' => $art],
              'tracks' => $tracks]);
+}
+
+// ---- editing what a track says -------------------------------------------
+// track_info: the file's tags, your edits and what is shown, for the edit form.
+case 'track_info': {
+    $id = (int)($_GET['id'] ?? 0);
+    $r = run($db, 'SELECT ' . TRACK_COLS . ', file_tags, mb_release, mb_recording FROM tracks WHERE id = :i AND deleted = 0', [':i' => $id])->fetch();
+    if (!$r) fail(404, 'no such track');
+    $edits = [];
+    foreach (run($db, 'SELECT field, value, source, edited_at FROM track_edits WHERE track_id = :i', [':i' => $id])->fetchAll() as $e) {
+        $edits[$e['field']] = ['value' => $e['value'], 'source' => $e['source'], 'at' => $e['edited_at']];
+    }
+    jsonOut(['ok' => true, 'track' => shapeTrack($r), 'file' => json_decode((string)($r['file_tags'] ?? ''), true) ?: null,
+             'edits' => (object)$edits, 'mb' => ['release' => $r['mb_release'], 'recording' => $r['mb_recording']]]);
+}
+
+// edit: items[] of {id, set: {field: value | null}}. null (or the file's own value) goes back to the file's tag.
+case 'edit': {
+    if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') fail(405, 'POST only');
+    $items = $in['items'] ?? null;
+    if (!is_array($items) || !$items) fail(400, 'items[] needed');
+    if (count($items) > 5000) fail(400, 'too many at once');
+    $source = ($in['source'] ?? '') === 'musicbrainz' ? 'musicbrainz' : 'manual';
+    $db->beginTransaction();
+    $ids = [];
+    foreach ($items as $it) {
+        $id = (int)($it['id'] ?? 0);
+        if ($id <= 0 || !is_array($it['set'] ?? null)) fail(400, 'each item needs id and set');
+        trackEdit($db, $id, $it['set'], $source);
+        $ids[] = $id;
+    }
+    trackApply($db, $ids);
+    $db->commit();
+    jsonOut(['ok' => true, 'tracks' => shapeById($db, $ids)]);
+}
+
+// edit_reset: back to the file's tags. fields[] limits it (e.g. ["cover"]); without it, everything.
+case 'edit_reset': {
+    if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') fail(405, 'POST only');
+    $ids = plIds($in['track_ids'] ?? null, 'track_ids');
+    $fields = isset($in['fields']) && is_array($in['fields']) ? array_values(array_map('strval', $in['fields'])) : null;
+    $db->beginTransaction();
+    $n = 0;
+    foreach ($ids as $id) {
+        if ($fields === null) $n += run($db, 'DELETE FROM track_edits WHERE track_id = :t', [':t' => $id])->rowCount();
+        else foreach ($fields as $f) $n += run($db, 'DELETE FROM track_edits WHERE track_id = :t AND field = :f', [':t' => $id, ':f' => $f])->rowCount();
+    }
+    trackApply($db, $ids);
+    $db->commit();
+    jsonOut(['ok' => true, 'cleared' => $n, 'tracks' => shapeById($db, $ids)]);
+}
+
+// tracks_by_id: fresh details for tracks the phone has saved (so edits reach the offline copies).
+case 'tracks_by_id': {
+    $ids = plIds($in['ids'] ?? null, 'ids');
+    jsonOut(['ok' => true, 'tracks' => shapeById($db, $ids)]);
+}
+
+// ---- MusicBrainz: find the release, then read it -----------------------------
+case 'mb_search': {
+    $artist = trim((string)($_GET['artist'] ?? '')); $album = trim((string)($_GET['album'] ?? '')); $q = trim((string)($_GET['q'] ?? ''));
+    if ($q === '' && $album === '') fail(400, 'album or q needed');
+    $query = $q !== '' ? $q : ('release:' . mbLucene($album) . ($artist !== '' && $artist !== 'Unknown artist' ? ' AND artist:' . mbLucene($artist) : ''));
+    $j = mbGet($db, $secrets, 'release', ['query' => $query, 'limit' => 20]);
+    $out = [];
+    foreach ((array)($j['releases'] ?? []) as $r) {
+        $formats = [];
+        foreach ((array)($r['media'] ?? []) as $m) $formats[] = (string)($m['format'] ?? '?');
+        $out[] = [
+            'id' => (string)$r['id'], 'title' => (string)($r['title'] ?? ''), 'artist' => mbCredit($r['artist-credit'] ?? []),
+            'date' => (string)($r['date'] ?? ''), 'country' => (string)($r['country'] ?? ''), 'tracks' => (int)($r['track-count'] ?? 0),
+            'discs' => count($formats), 'format' => implode(' + ', array_unique($formats)), 'status' => (string)($r['status'] ?? ''),
+            'type' => (string)($r['release-group']['primary-type'] ?? ''), 'note' => (string)($r['disambiguation'] ?? ''),
+            'score' => (int)($r['score'] ?? 0),
+        ];
+    }
+    jsonOut(['ok' => true, 'query' => $query, 'releases' => $out]);
+}
+
+case 'mb_release': {
+    $rid = (string)($_GET['id'] ?? '');
+    if (!preg_match('/^[0-9a-f-]{36}$/', $rid)) fail(400, 'a MusicBrainz release id is needed');
+    $r = mbGet($db, $secrets, "release/$rid", ['inc' => 'recordings+artist-credits+genres+release-groups']);
+    $genres = [];
+    foreach (array_merge((array)($r['genres'] ?? []), (array)($r['release-group']['genres'] ?? [])) as $g) {
+        $nm = (string)($g['name'] ?? ''); if ($nm !== '') $genres[$nm] = max($genres[$nm] ?? 0, (int)($g['count'] ?? 0));
+    }
+    arsort($genres);
+    $media = [];
+    foreach ((array)($r['media'] ?? []) as $m) {
+        $tr = [];
+        foreach ((array)($m['tracks'] ?? []) as $t) {
+            $tr[] = ['no' => (int)($t['position'] ?? 0), 'title' => (string)($t['title'] ?? ($t['recording']['title'] ?? '')),
+                     'artist' => mbCredit($t['artist-credit'] ?? ($t['recording']['artist-credit'] ?? [])),
+                     'ms' => isset($t['length']) ? (int)$t['length'] : (isset($t['recording']['length']) ? (int)$t['recording']['length'] : null),
+                     'recording' => (string)($t['recording']['id'] ?? '')];
+        }
+        $media[] = ['disc' => (int)($m['position'] ?? count($media) + 1), 'format' => (string)($m['format'] ?? ''), 'tracks' => $tr];
+    }
+    $date = (string)($r['date'] ?? ($r['release-group']['first-release-date'] ?? ''));
+    jsonOut(['ok' => true, 'release' => [
+        'id' => (string)$r['id'], 'title' => (string)($r['title'] ?? ''), 'artist' => mbCredit($r['artist-credit'] ?? []),
+        'date' => $date, 'year' => preg_match('/^(\d{4})/', $date, $mm) ? (int)$mm[1] : null,
+        'firstYear' => preg_match('/^(\d{4})/', (string)($r['release-group']['first-release-date'] ?? ''), $m2) ? (int)$m2[1] : null,
+        'genres' => array_slice(array_keys($genres), 0, 5), 'cover' => !empty($r['cover-art-archive']['front']),
+        'coverThumb' => !empty($r['cover-art-archive']['front']) ? AUDIO_CAA_BASE . "/release/$rid/front-250" : null,
+        'media' => $media,
+    ]]);
+}
+
+// ---- covers you choose: from the Cover Art Archive, or a picture you upload ----
+case 'cover_mb': {
+    if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') fail(405, 'POST only');
+    $ids = plIds($in['track_ids'] ?? null, 'track_ids');
+    $rid = (string)($in['release'] ?? '');
+    if (!$ids || !preg_match('/^[0-9a-f-]{36}$/', $rid)) fail(400, 'track_ids and a release id needed');
+    [$code, $body] = httpGet(AUDIO_CAA_BASE . "/release/$rid/front-1200", mbUserAgent($secrets), 'image/*', 40);
+    if ($code === 404) fail(404, 'the Cover Art Archive has no front cover for that release');
+    if ($code !== 200 || $body === '') fail(502, $code ? "the Cover Art Archive answered $code" : 'couldn’t reach the Cover Art Archive');
+    $name = storeCover($body);
+    $db->beginTransaction();
+    foreach ($ids as $id) trackEdit($db, $id, ['cover' => $name], 'musicbrainz');
+    trackApply($db, $ids);
+    $db->commit();
+    jsonOut(['ok' => true, 'tracks' => shapeById($db, $ids)]);
+}
+
+case 'cover_upload': {
+    if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') fail(405, 'POST only');
+    $ids = plIds($in['track_ids'] ?? null, 'track_ids');
+    $data = (string)($in['data'] ?? '');
+    if (str_starts_with($data, 'data:')) $data = substr($data, (int)strpos($data, ',') + 1);
+    $bytes = base64_decode($data, true);
+    if (!$ids || $bytes === false || $bytes === '') fail(400, 'track_ids and a picture needed');
+    $name = storeCover($bytes);
+    $db->beginTransaction();
+    foreach ($ids as $id) trackEdit($db, $id, ['cover' => $name], 'manual');
+    trackApply($db, $ids);
+    $db->commit();
+    jsonOut(['ok' => true, 'tracks' => shapeById($db, $ids)]);
 }
 
 // ---- liked: the built-in playlist the hearts add to -----------------------
@@ -963,33 +1338,30 @@ case 'audio_worker_tags': {
     $int  = static fn($v): ?int => ($v === null || $v === '' || !is_numeric($v) || (int)$v <= 0) ? null : (int)$v;
     $now = gmdate('c');
     $db->beginTransaction();
-    $st = $db->prepare("UPDATE tracks SET title = :title, artist = :artist, album_artist = :aa, album = :album,
-                          track_no = :no, disc_no = :disc, year = :year, genre = :genre, duration_ms = :ms,
+    // The file's own tags go in file_tags; trackApply then puts your edits on top for what is shown.
+    $st = $db->prepare("UPDATE tracks SET file_tags = :ft, duration_ms = :ms,
                           bitrate = :br, sample_rate = :sr, channels = :ch, codec = :codec, tag_error = :err,
-                          search = :search, tagged = 1, updated_at = :now WHERE path = :path");
-    $n = 0;
+                          tagged = 1, updated_at = :now WHERE path = :path");
+    $idOf = $db->prepare('SELECT id FROM tracks WHERE path = :p');
+    $n = 0; $ids = [];
     foreach ($list as $t) {
-        $artist = $clip($t['artist'] ?? '');
-        $aa     = $clip($t['album_artist'] ?? '');
-        if ($aa === '') $aa = $artist;
-        if ($aa === '') $aa = 'Unknown artist';
         $tpath = cleanPath((string)($t['path'] ?? ''));
-        $titleTag = $clip($t['title'] ?? '');
-        $albumTag = $clip($t['album'] ?? '');
+        $ft = [
+            'title' => $clip($t['title'] ?? ''), 'artist' => $clip($t['artist'] ?? ''), 'album_artist' => $clip($t['album_artist'] ?? ''),
+            'album' => $clip($t['album'] ?? ''), 'track_no' => $int($t['track_no'] ?? null), 'disc_no' => $int($t['disc_no'] ?? null),
+            'year' => $int($t['year'] ?? null), 'genre' => $clip($t['genre'] ?? '', 120),
+        ];
         $st->execute([
-            ':path' => $tpath,
-            ':search' => foldText(implode(' ', [$titleTag, $artist, $aa, $albumTag, $tpath])),
-            ':title' => ($ti = $clip($t['title'] ?? '')) === '' ? null : $ti,
-            ':artist' => $artist, ':aa' => $aa, ':album' => $clip($t['album'] ?? ''),
-            ':no' => $int($t['track_no'] ?? null), ':disc' => $int($t['disc_no'] ?? null), ':year' => $int($t['year'] ?? null),
-            ':genre' => $clip($t['genre'] ?? '', 120), ':ms' => $int($t['duration_ms'] ?? null),
+            ':path' => $tpath, ':ft' => json_encode($ft, JSON_UNESCAPED_UNICODE),
+            ':ms' => $int($t['duration_ms'] ?? null),
             ':br' => $int($t['bitrate'] ?? null), ':sr' => $int($t['sample_rate'] ?? null), ':ch' => $int($t['channels'] ?? null),
             ':codec' => $clip($t['codec'] ?? '', 40) ?: null,
             ':err' => ($e = $clip($t['error'] ?? '', 300)) === '' ? null : $e,
             ':now' => $now,
         ]);
-        $n += $st->rowCount();
+        if ($st->rowCount()) { $n++; $idOf->execute([':p' => $tpath]); $ids[] = (int)$idOf->fetchColumn(); }
     }
+    trackApply($db, $ids);
     $db->commit();
     jsonOut(['ok' => true, 'updated' => $n]);
 }

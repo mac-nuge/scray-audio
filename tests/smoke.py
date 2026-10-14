@@ -16,7 +16,10 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORK = os.path.join(REPO, "tests", ".work")
 BOX = os.path.join(WORK, "box")
 DB = os.path.join(WORK, "audio.sqlite")
-API_PORT, BOX_PORT = 8098, 8099
+API_PORT, BOX_PORT, MB_PORT = 8098, 8099, 8097
+# what php -S needs, besides the database: covers in the work folder, MusicBrainz and the Cover Art Archive faked
+PHP_ENV = {"SCRAY_AUDIO_DATA_DIR": os.path.join(REPO, "tests", "stub-data"), "SCRAY_AUDIO_COVERS_DIR": os.path.join(WORK, "covers"),
+           "SCRAY_AUDIO_MB_BASE": f"http://127.0.0.1:{MB_PORT}/ws/2", "SCRAY_AUDIO_CAA_BASE": f"http://127.0.0.1:{MB_PORT}"}
 API = f"http://127.0.0.1:{API_PORT}/api.php"
 procs = []
 fails = []
@@ -110,8 +113,8 @@ def main():
     print("making a little library")
     make_library()
     start([sys.executable, os.path.join(REPO, "tests", "fake_box.py"), BOX, str(BOX_PORT)])
-    start(["php", "-S", f"127.0.0.1:{API_PORT}", "-t", REPO],
-          {"SCRAY_AUDIO_DATA_DIR": os.path.join(REPO, "tests", "stub-data"), "SCRAY_AUDIO_TEST_DB": DB})
+    start([sys.executable, os.path.join(REPO, "tests", "fake_mb.py"), str(MB_PORT)])
+    start(["php", "-S", f"127.0.0.1:{API_PORT}", "-t", REPO], {**PHP_ENV, "SCRAY_AUDIO_TEST_DB": DB})
     assert wait_up(f"{API}?action=ping") and wait_up(f"http://127.0.0.1:{BOX_PORT}/x"), "servers did not start"
 
     print("base64 bodies (so a firewall has nothing to match on)")
@@ -311,6 +314,86 @@ def main():
     check("a matching folder, not its sub-folders", [x["path"] for x in f] == ["Music/Artist One"] and f[0]["tracks"] == 2, str(f))
     f = call("search", {"q": "artist album"})[1]["folders"]
     check("words can match across the path", [x["path"] for x in f] == ["Music/Artist One/Album A"], str(f))
+
+    print("editing")
+    sec = byname["Second"]
+    st, j = call("track_info", {"id": sec})
+    check("track_info has the file's tags", st == 200 and j["file"]["title"] == "Second" and j["file"]["album_artist"] == "" and j["edits"] == {}, str(j)[:300])
+    check("edit needs POST", call("edit", {"id": sec})[0] == 405)
+    check("an unknown field is refused", call("edit", body={"items": [{"id": sec, "set": {"path": "x"}}]})[0] == 400)
+    check("a bad number is refused", call("edit", body={"items": [{"id": sec, "set": {"year": "nineteen"}}]})[0] == 400)
+    st, j = call("edit", body={"items": [{"id": sec, "set": {"title": "  Second   Coming ", "year": 2001, "genre": "Ambient"}}]})
+    t = j["tracks"][0] if st == 200 else {}
+    check("an edit shows at once (spaces tidied)", st == 200 and t["title"] == "Second Coming" and t["year"] == 2001 and t["edited"] is True, str(j)[:300])
+    edits = call("track_info", {"id": sec})[1]["edits"]
+    check("...and only what differs from the file is kept", set(edits) == {"title", "year"} and edits["title"]["source"] == "manual", str(edits))
+    check("search finds the new title", [x["title"] for x in call("tracks", {"q": "coming"})[1]["tracks"]] == ["Second Coming"])
+    call("edit", body={"items": [{"id": byname["Tune"], "set": {"album_artist": "Compilers", "album": "Compiled"}},
+                                 {"id": byname["Other"], "set": {"album_artist": "Compilers", "album": "Compiled"}}]})
+    check("album artist and album edits regroup the albums", any(a["artist"] == "Compilers" and a["album"] == "Compiled" and a["tracks"] == 2 for a in call("albums")[1]["albums"])
+          and not any(a["album"] == "Compilation" for a in call("albums")[1]["albums"]))
+    # a rescan that re-reads the file keeps the edit on top of the new tags
+    ff(os.path.join(BOX, "Music", "Artist One", "Album A", "02 - Second.flac"), dict(title="Second", artist="Artist One", album="Album A", track="2/2", date="1999", genre="Drone"), "flac")
+    code, out = scan()
+    st, j = call("track_info", {"id": sec})
+    check("a rescan updates the file's tags but keeps the edits", j["file"]["genre"] == "Drone" and j["track"]["genre"] == "Drone" and j["track"]["title"] == "Second Coming", str(j)[:400])
+    st, j = call("edit", body={"items": [{"id": sec, "set": {"year": None}}]})
+    check("null puts one field back to the file's", j["tracks"][0]["year"] == 1999 and j["tracks"][0]["title"] == "Second Coming")
+    st, j = call("edit_reset", body={"track_ids": [sec, byname["Tune"], byname["Other"]]})
+    check("reset puts everything back", st == 200 and j["tracks"][0]["title"] == "Second" and j["tracks"][0]["edited"] is False
+          and any(a["album"] == "Compilation" for a in call("albums")[1]["albums"]), str(j)[:300])
+    check("tracks_by_id answers in the order asked, skipping unknown ids", [t["id"] for t in call("tracks_by_id", body={"ids": [sec, 424242, byname["First"]]})[1]["tracks"]] == [sec, byname["First"]])
+
+    print("covers you choose")
+    import base64 as b64m
+    jpg = open(os.path.join(BOX, "Music", "Artist One", "Album A", "cover.jpg"), "rb").read()
+    check("an upload that isn't a picture is refused", call("cover_upload", body={"track_ids": [byname["Tune"]], "data": b64m.b64encode(b"hello").decode()})[0] == 400)
+    st, j = call("cover_upload", body={"track_ids": [byname["Tune"], byname["Other"]], "data": "data:image/jpeg;base64," + b64m.b64encode(jpg).decode()})
+    check("an uploaded cover", st == 200 and all(t["cover"] and len(t["coverv"]) == 12 for t in j["tracks"]), str(j)[:300])
+    st, j = call("cover_url", {"t": byname["Tune"]})
+    check("cover_url points at the signed art link", st == 200 and "action=art" in j["url"], str(j))
+    with urllib.request.urlopen(j["url"]) as r:
+        got = r.read()
+        check("the art link serves it, no login needed", got == jpg and r.headers["Content-Type"] == "image/jpeg")
+    bad = j["url"].replace("&s=", "&s=0")
+    try:
+        urllib.request.urlopen(bad); forged = 200
+    except urllib.error.HTTPError as e:
+        forged = e.code
+    check("a forged art link is refused", forged == 403)
+    old = urllib.parse.urlparse(j["url"]); oq = urllib.parse.parse_qs(old.query)
+    try:
+        urllib.request.urlopen(f"{API}?action=art&f={oq['f'][0]}&e=1&s={oq['s'][0]}"); stale = 200
+    except urllib.error.HTTPError as e:
+        stale = e.code
+    check("an expired art link is refused", stale == 403)
+    check("the album's art is the new cover", any(a["album"] == "Compilation" and a["art"] in (byname["Tune"], byname["Other"]) for a in call("albums")[1]["albums"]))
+    j = call("edit_reset", body={"track_ids": [byname["Tune"], byname["Other"]], "fields": ["cover"]})[1]
+    check("resetting the cover goes back to none (that folder has no art)", all(not t["cover"] and t["coverv"] == "" for t in j["tracks"]), str(j)[:200])
+
+    print("musicbrainz")
+    hits = lambda: json.load(urllib.request.urlopen(f"http://127.0.0.1:{MB_PORT}/__hits"))["hits"]
+    h0 = hits()
+    st, j = call("mb_search", {"artist": "Artist One", "album": "Album A"})
+    check("search finds releases", st == 200 and [r["id"] for r in j["releases"]][:1] == ["11111111-2222-3333-4444-555555555555"] and j["releases"][0]["format"] == "CD"
+          and 'release:"Album A" AND artist:"Artist One"' == j["query"], str(j)[:400])
+    call("mb_search", {"artist": "Artist One", "album": "Album A"})
+    check("the same search again comes from the cache", hits() == h0 + 1)
+    st, j = call("mb_release", {"id": "11111111-2222-3333-4444-555555555555"})
+    r = j.get("release", {})
+    check("a release with its tracks, credits, year and genres", st == 200 and r["year"] == 1999 and r["firstYear"] == 1998 and r["cover"] is True
+          and [t["title"] for t in r["media"][0]["tracks"]] == ["First Light", "Second Wind"] and r["media"][0]["tracks"][1]["artist"] == "Artist One feat. Guest"
+          and r["genres"][:2] == ["electronic", "ambient"], str(j)[:500])
+    check("an unknown release is 404", call("mb_release", {"id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"})[0] == 404)
+    check("a bad release id is refused before asking", call("mb_release", {"id": "x"})[0] == 400)
+    st, j = call("edit", body={"source": "musicbrainz", "items": [{"id": sec, "set": {"title": "Second Wind", "mb_release": r["id"], "mb_recording": "rec-2"}}]})
+    i = call("track_info", {"id": sec})[1]
+    check("a MusicBrainz edit is marked as such, with its ids", i["edits"]["title"]["source"] == "musicbrainz" and i["mb"] == {"release": r["id"], "recording": "rec-2"}, str(i)[:300])
+    st, j = call("cover_mb", body={"track_ids": [byname["First"], sec], "release": r["id"]})
+    check("the cover from the Cover Art Archive (after its redirect)", st == 200 and all(t["coverv"] not in ("", "f") for t in j["tracks"]), str(j)[:300])
+    check("a release with no cover says so", call("cover_mb", body={"track_ids": [sec], "release": "00000000-0000-0000-0000-000000000000"})[0] == 404)
+    call("edit_reset", body={"track_ids": [sec, byname["First"]]})
+    check("after reset the folder art is back", call("tracks_by_id", body={"ids": [sec]})[1]["tracks"][0]["coverv"] == "f")
 
     print("files that go away")
     os.remove(os.path.join(BOX, "Music", "Singles", "loose track.mp3"))

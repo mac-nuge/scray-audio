@@ -21,4 +21,12 @@ if (!defined('SCRAY_SECRETS_FILE')) define('SCRAY_SECRETS_FILE', $__dir . '/scra
 const AUDIO_LOGIN_URL = '/scray/login.php';
 define('AUDIO_AUTH_FILE', $__dir . '/scray_auth.php');
 define('AUDIO_DB_FILE',   $__dir . '/audio.sqlite');
+// Covers you chose (MusicBrainz / upload), kept beside the database. Tests point it elsewhere.
+$__c = getenv('SCRAY_AUDIO_COVERS_DIR');
+define('AUDIO_COVERS_DIR', ($__c !== false && $__c !== '') ? rtrim($__c, '/') : $__dir . '/audio-covers');
+// MusicBrainz and the Cover Art Archive. Tests point these at a stand-in.
+$__m = getenv('SCRAY_AUDIO_MB_BASE');
+define('AUDIO_MB_BASE', ($__m !== false && $__m !== '') ? rtrim($__m, '/') : 'https://musicbrainz.org/ws/2');
+$__a = getenv('SCRAY_AUDIO_CAA_BASE');
+define('AUDIO_CAA_BASE', ($__a !== false && $__a !== '') ? rtrim($__a, '/') : 'https://coverartarchive.org');
 unset($__d, $__dir);

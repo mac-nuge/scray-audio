@@ -98,6 +98,7 @@
 
   // Covers. In a browser the <img> carries the session cookie; in the app it can't send the key, so ask for a signed link.
   const coverLinks = new Map();
+  const artVer = new Map();                 // track id -> which cover, once you change one (so the old picture isn't reused)
   const coverQueue = [];
   let coverBusy = 0;
   function coverPump() {
@@ -120,7 +121,7 @@
   function setCover(img, id) {
     const local = OFF && OFF.coverUrl(id);
     if (local) { img.src = local; return; }
-    if (!APP) { img.src = `api.php?action=cover&t=${id}`; return; }
+    if (!APP) { img.src = `api.php?action=cover&t=${id}` + (artVer.has(id) ? `&v=${enc(artVer.get(id))}` : ''); return; }
     const c = coverLinks.get(id);
     if (c && c.until > Date.now()) { img.src = c.url; return; }
     img.dataset.cover = id;
@@ -414,6 +415,16 @@
   function paintRange(el) { el.style.setProperty('--fill', (el.value - el.min) / (el.max - el.min) * 100 + '%'); }
 
   function paintNow(t) {
+    paintNowInfo(t);
+    $('tdur').textContent = fmtMs(t.ms);
+    $('tcur').textContent = '0:00';
+    $('seek').value = 0; paintRange($('seek'));
+    markNow();
+    renderQueue();
+    setMediaSession(t);
+  }
+
+  function paintNowInfo(t) {
     $('nptitle').textContent = t.title;
     const nl = $('nplike');
     nl.dataset.like = t.id; nl.hidden = false; paintLike(nl);
@@ -425,12 +436,6 @@
     cv.replaceChildren(h('span', { text: '♪' }));
     if (t.cover) { const img = h('img', { alt: '' }); img.addEventListener('error', () => img.remove()); cv.append(img); setCover(img, t.id); }
     document.title = `${t.title} – ${t.artist || 'Scray audio'}`;
-    $('tdur').textContent = fmtMs(t.ms);
-    $('tcur').textContent = '0:00';
-    $('seek').value = 0; paintRange($('seek'));
-    markNow();
-    renderQueue();
-    setMediaSession(t);
   }
 
   function paintPlay() {
@@ -861,6 +866,7 @@
     if (t.album) items.push({ label: 'Go to album', hint: t.album, onclick: go(albumHash(t)) });
     if (known(t.albumArtist)) items.push({ label: 'Go to artist', hint: t.albumArtist, onclick: go(`#/artist/${enc(t.albumArtist)}`) });
     if (t.artist && t.artist !== t.albumArtist) items.push({ label: 'More by', hint: t.artist, onclick: go(`#/search/${enc(t.artist)}`) });
+    items.push({ label: 'Edit details…', onclick: () => editTrack(t) });
     if (t.folder) items.push({ label: 'Show in folder', hint: t.folder.split('/').pop(), onclick: go(`#/f/${enc(t.folder)}`) });
     if (OFF && t.path) items.push({ sep: true }, OFF.has(t.id)
       ? { label: 'Remove from offline', onclick: () => removeOffline(async () => [t]) }
@@ -882,6 +888,310 @@
 
   // queue rows and the now-playing strip get the same menu
   function menuAt(e, el) { return e.clientX || e.clientY ? { x: e.clientX, y: e.clientY } : { el }; }
+
+  // ----------------------------------------------------- editing what tracks say
+  // Edits live in the library's database on top of the files' own tags (api.php: edit, edit_reset, cover_*).
+  // The files themselves are not touched.
+  const needServer = () => { if (offlineOn()) { toast('Editing needs the library - turn Offline off first', true); return true; } return false; };
+
+  /** Fresh details for tracks you just edited: the queue, the now-playing strip, saved copies and covers catch up. */
+  function tracksChanged(list) {
+    const byId = new Map(list.map(t => [t.id, t]));
+    for (const arr of [P.queue, P.orig]) arr.forEach((t, i) => { const n = byId.get(t.id); if (n) arr[i] = { ...t, ...n }; });
+    list.forEach(t => { artVer.set(t.id, t.coverv || ''); coverLinks.delete(t.id); });
+    const cur = P.queue[P.idx];
+    if (cur && byId.has(cur.id)) { paintNowInfo(cur); setMediaSession(cur); renderQueue(); }
+    if (OFF && OFF.refresh) OFF.refresh(list, dlCtx).catch(() => {});
+  }
+  /** After an edit: stay on the page, or follow the album to its new name. */
+  function afterEdit(list, wasHash) {
+    tracksChanged(list);
+    const t = list[0];
+    const here = location.hash;
+    if (t && here.startsWith('#/album/')) {
+      const to = albumHash(t);
+      if (to !== here && here === wasHash) { location.hash = to; return; }
+    }
+    const y = window.scrollY;
+    route().then(() => window.scrollTo(0, y));
+  }
+
+  /** A larger dialog for forms. Returns { box, body, foot, close }. */
+  function openSheet(title, cls) {
+    const prev = document.activeElement;
+    const body = h('div', { class: 'sbody' }), foot = h('div', { class: 'dbtns' });
+    const box = h('div', { class: 'dbox sheet ' + (cls || ''), role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+      h('div', { class: 'shead2' }, h('h3', { text: title }), h('button', { class: 'x', type: 'button', 'aria-label': 'Close', text: '×', onclick: () => close() })), body, foot);
+    const back = h('div', { class: 'dback' }, box);
+    const keys = e => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); } };
+    function close() {
+      document.removeEventListener('keydown', keys, true);
+      back.remove();
+      if (prev && document.contains(prev)) { try { prev.focus({ preventScroll: true }); } catch (e) { /* gone */ } }
+    }
+    back.addEventListener('mousedown', e => { if (e.target === back) close(); });
+    document.addEventListener('keydown', keys, true);
+    document.body.append(back);
+    return { box, body, foot, close };
+  }
+  const busy = (btn, on, label) => { btn.disabled = on; if (label) btn.textContent = label; };
+
+  /** A picture from the phone or computer, made no bigger than 1400 px, as a JPEG data URL. */
+  function pickPicture() {
+    return new Promise((resolve, reject) => {
+      const inp = h('input', { type: 'file', accept: 'image/*', style: 'display:none' });
+      inp.addEventListener('change', () => {
+        const f = inp.files && inp.files[0];
+        inp.remove();
+        if (!f) { resolve(null); return; }
+        const url = URL.createObjectURL(f);
+        const img = new Image();
+        img.onload = () => {
+          const k = Math.min(1, 1400 / Math.max(img.naturalWidth, img.naturalHeight));
+          const c = document.createElement('canvas');
+          c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+          c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+          URL.revokeObjectURL(url);
+          resolve(c.toDataURL('image/jpeg', 0.9));
+        };
+        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('That picture couldn’t be read')); };
+        img.src = url;
+      });
+      document.body.append(inp);
+      inp.click();
+    });
+  }
+
+  /** The cover row of a form: the picture, Upload…, and Back to the folder's when one was chosen. */
+  function coverRow(ids, artId, custom, after) {
+    const pic = h('div', { class: 'ecover' }, coverEl(artId));
+    const up = h('button', { class: 'btn', type: 'button', text: 'Upload picture…' });
+    const reset = custom ? h('button', { class: 'btn', type: 'button', text: 'Use the folder’s', title: 'Forget the chosen cover' }) : null;
+    up.addEventListener('click', async () => {
+      try {
+        const data = await pickPicture();
+        if (!data) return;
+        busy(up, true, 'Uploading…');
+        const j = await apiPost('cover_upload', { track_ids: ids, data });
+        after(j.tracks); toast('Cover changed');
+      } catch (e) { toast(e.message, true); busy(up, false, 'Upload picture…'); }
+    });
+    if (reset) reset.addEventListener('click', async () => {
+      try { busy(reset, true); const j = await apiPost('edit_reset', { track_ids: ids, fields: ['cover'] }); after(j.tracks); toast('Back to the folder’s cover'); }
+      catch (e) { toast(e.message, true); busy(reset, false); }
+    });
+    return h('div', { class: 'erow ecov' }, pic, h('div', { class: 'ecbtns' }, h('b', { text: 'Cover' }), up, reset));
+  }
+
+  const TRACK_FIELDS = [['title', 'Title'], ['artist', 'Artist'], ['album', 'Album'], ['album_artist', 'Album artist'],
+    ['track_no', 'Track', 1], ['disc_no', 'Disc', 1], ['year', 'Year', 1], ['genre', 'Genre']];
+  const VIEW_KEY = { title: 'title', artist: 'artist', album: 'album', album_artist: 'albumArtist', track_no: 'no', disc_no: 'disc', year: 'year', genre: 'genre' };
+
+  async function editTrack(t) {
+    if (needServer()) return;
+    let info;
+    try { info = await api('track_info', { id: t.id }); } catch (e) { toast(e.message, true); return; }
+    const file = info.file || {}, edits = info.edits || {};
+    const wasHash = location.hash;
+    const sh = openSheet('Edit details');
+    const fv = k => (file[k] == null ? '' : String(file[k]));
+    const cur = k => (edits[k] ? String(edits[k].value ?? '') : fv(k));
+    const inputs = {};
+    const rows = TRACK_FIELDS.map(([k, label, num]) => {
+      const inp = h('input', { class: 'dinput', type: num ? 'number' : 'text', inputmode: num ? 'numeric' : null, min: num ? '1' : null, value: cur(k),
+        placeholder: k === 'album_artist' ? '(same as the artist)' : '', 'aria-label': label });
+      inputs[k] = inp;
+      const hint = h('span', { class: 'ehint' });
+      const back = h('button', { class: 'eback', type: 'button', title: 'Back to what the file says', text: '↺' });
+      const paint = () => { const diff = inp.value.trim() !== fv(k); hint.textContent = diff ? `File: ${fv(k) || '(empty)'}` : ''; back.hidden = !diff; };
+      inp.addEventListener('input', paint);
+      back.addEventListener('click', () => { inp.value = fv(k); paint(); inp.focus(); });
+      paint();
+      return h('label', { class: 'erow' + (num ? ' num' : '') }, h('span', { class: 'elab', text: label }), h('span', { class: 'ein' }, inp, back), hint);
+    });
+    const done = list => { info.track = list[0]; afterEdit(list, wasHash); sh.close(); };
+    sh.body.append(h('p', { class: 'enote', text: t.path || '' }), h('div', { class: 'egrid' }, rows),
+      coverRow([t.id], info.track.cover ? t.id : null, !!edits.cover, list => { afterEdit(list, wasHash); sh.close(); }),
+      info.mb && info.mb.release ? h('p', { class: 'enote' }, 'Matched on MusicBrainz: ', h('a', { href: `https://musicbrainz.org/release/${info.mb.release}`, target: '_blank', rel: 'noopener', text: 'release' })) : null);
+    const resetAll = h('button', { class: 'btn', type: 'button', text: 'Back to the file’s tags' });
+    resetAll.hidden = !Object.keys(edits).some(k => k !== 'mb_release' && k !== 'mb_recording');
+    const cancel = h('button', { class: 'btn', type: 'button', text: 'Cancel', onclick: () => sh.close() });
+    const save = h('button', { class: 'btn go', type: 'button', text: 'Save' });
+    sh.foot.append(resetAll, cancel, save);
+    resetAll.addEventListener('click', async () => {
+      try { busy(resetAll, true); done((await apiPost('edit_reset', { track_ids: [t.id] })).tracks); toast('Back to the file’s tags'); }
+      catch (e) { toast(e.message, true); busy(resetAll, false); }
+    });
+    save.addEventListener('click', async () => {
+      const set = {};
+      for (const [k] of TRACK_FIELDS) {
+        const v = inputs[k].value.trim();
+        if (v === cur(k)) continue;                          // unchanged
+        set[k] = v === fv(k) ? null : v;
+      }
+      if (!Object.keys(set).length) { sh.close(); return; }
+      try { busy(save, true, 'Saving…'); done((await apiPost('edit', { items: [{ id: t.id, set }] })).tracks); toast('Saved'); }
+      catch (e) { toast(e.message, true); busy(save, false, 'Save'); }
+    });
+    setTimeout(() => inputs.title.focus(), 30);
+  }
+
+  /** The value every track agrees on, or null when they differ. */
+  const common = (tracks, k) => { const vs = new Set(tracks.map(t => String(t[VIEW_KEY[k]] ?? ''))); return vs.size === 1 ? [...vs][0] : null; };
+
+  function editAlbum(tracks) {
+    if (needServer()) return;
+    const wasHash = location.hash;
+    const sh = openSheet('Edit album', 'wide');
+    const ALBUM = [['album', 'Album'], ['album_artist', 'Album artist'], ['year', 'Year', 1], ['genre', 'Genre']];
+    const top = {};
+    const head = ALBUM.map(([k, label, num]) => {
+      const c = common(tracks, k);
+      const inp = h('input', { class: 'dinput', type: num ? 'number' : 'text', min: num ? '1' : null, value: c ?? '', placeholder: c === null ? 'Mixed - leave empty to keep' : '', 'aria-label': label });
+      top[k] = { inp, was: c ?? '' };
+      return h('label', { class: 'erow' + (num ? ' num' : '') }, h('span', { class: 'elab', text: label }), h('span', { class: 'ein' }, inp));
+    });
+    const rowsIn = tracks.map(t => {
+      const r = { t, no: h('input', { class: 'dinput n', type: 'number', min: '1', value: t.no ?? '', 'aria-label': 'Track number' }),
+        disc: h('input', { class: 'dinput n', type: 'number', min: '1', value: t.disc ?? '', 'aria-label': 'Disc' }),
+        title: h('input', { class: 'dinput', type: 'text', value: t.title, 'aria-label': 'Title' }),
+        artist: h('input', { class: 'dinput', type: 'text', value: t.artist, 'aria-label': 'Artist' }) };
+      return r;
+    });
+    const multi = tracks.some(t => (t.disc || 1) !== 1);
+    const art = (tracks.find(t => t.cover) || {}).id;
+    sh.body.append(h('div', { class: 'egrid' }, head),
+      coverRow(tracks.map(t => t.id), art ?? null, tracks.some(t => t.coverv && t.coverv !== 'f'), list => { afterEdit(list, wasHash); sh.close(); }),
+      h('div', { class: 'etracks' + (multi ? ' discs' : '') },
+        h('div', { class: 'eth' }, h('span', { text: '#' }), multi ? h('span', { text: 'Disc' }) : null, h('span', { text: 'Title' }), h('span', { text: 'Artist' })),
+        rowsIn.map(r => h('div', { class: 'etr' }, r.no, multi ? r.disc : null, r.title, r.artist))),
+      h('p', { class: 'enote', text: 'Saved in the library, not in the files. “Back to the files’ tags” undoes it.' }));
+    const reset = h('button', { class: 'btn', type: 'button', text: 'Back to the files’ tags' });
+    reset.hidden = !tracks.some(t => t.edited);
+    const cancel = h('button', { class: 'btn', type: 'button', text: 'Cancel', onclick: () => sh.close() });
+    const save = h('button', { class: 'btn go', type: 'button', text: 'Save' });
+    sh.foot.append(reset, cancel, save);
+    reset.addEventListener('click', async () => {
+      const yes = await dialog({ title: 'Undo every edit to this album?', text: 'Titles, numbers, names and the cover go back to what the files say.', ok: 'Undo edits', danger: true });
+      if (!yes) return;
+      try { busy(reset, true); const j = await apiPost('edit_reset', { track_ids: tracks.map(t => t.id) }); afterEdit(j.tracks, wasHash); sh.close(); toast('Back to the files’ tags'); }
+      catch (e) { toast(e.message, true); busy(reset, false); }
+    });
+    save.addEventListener('click', async () => {
+      const shared = {};
+      for (const [k] of ALBUM) { const v = top[k].inp.value.trim(); if (v !== top[k].was && !(v === '' && common(tracks, k) === null)) shared[k] = v; }
+      const items = [];
+      for (const r of rowsIn) {
+        const set = { ...shared };
+        const t = r.t;
+        if (r.no.value.trim() !== String(t.no ?? '')) set.track_no = r.no.value.trim();
+        if (multi && r.disc.value.trim() !== String(t.disc ?? '')) set.disc_no = r.disc.value.trim();
+        if (r.title.value.trim() !== t.title) set.title = r.title.value.trim();
+        if (r.artist.value.trim() !== t.artist) set.artist = r.artist.value.trim();
+        if (Object.keys(set).length) items.push({ id: t.id, set });
+      }
+      if (!items.length) { sh.close(); return; }
+      try { busy(save, true, 'Saving…'); const j = await apiPost('edit', { items }); afterEdit(j.tracks, wasHash); sh.close(); toast(`Saved ${plural(items.length, 'track')}`); }
+      catch (e) { toast(e.message, true); busy(save, false, 'Save'); }
+    });
+  }
+
+  // ---- MusicBrainz: search, pick a release, see what would change, apply
+  const titleCase = s => s.replace(/(^|[\s\-/])\p{Ll}/gu, m => m.toUpperCase());
+  function mbPairs(ours, rel) {
+    const theirs = rel.media.flatMap(m => m.tracks.map(t => ({ ...t, disc: m.disc })));
+    if (ours.length === theirs.length) return ours.map((t, i) => [t, theirs[i]]);
+    if (ours.every(t => t.no)) return ours.map(t => [t, theirs.find(x => x.no === t.no && x.disc === (t.disc || 1)) || null]);
+    return ours.map((t, i) => [t, theirs[i] || null]);
+  }
+
+  function findOnMB(tracks) {
+    if (needServer()) return;
+    const wasHash = location.hash;
+    const sh = openSheet('Find on MusicBrainz', 'wide');
+    const a0 = common(tracks, 'album_artist'), al0 = common(tracks, 'album');
+    const artist = h('input', { class: 'dinput', type: 'text', value: a0 && a0 !== 'Unknown artist' ? a0 : (common(tracks, 'artist') || ''), placeholder: 'Artist', 'aria-label': 'Artist' });
+    const album = h('input', { class: 'dinput', type: 'text', value: al0 || '', placeholder: 'Album', 'aria-label': 'Album' });
+    const go = h('button', { class: 'btn go', type: 'submit', text: 'Search' });
+    const out = h('div', { class: 'mbres' });
+    const form = h('form', { class: 'mbq' }, artist, album, go);
+    sh.body.append(form, out);
+    const cancel = h('button', { class: 'btn', type: 'button', text: 'Close', onclick: () => sh.close() });
+    sh.foot.append(cancel);
+
+    async function search() {
+      if (!album.value.trim()) { album.focus(); return; }
+      out.replaceChildren(h('div', { class: 'loading', text: 'Asking MusicBrainz…' }));
+      try {
+        const j = await api('mb_search', { artist: artist.value.trim(), album: album.value.trim() });
+        if (!j.releases.length) { out.replaceChildren(h('div', { class: 'empty', text: 'Nothing found. Try fewer words, or check the spelling.' })); return; }
+        out.replaceChildren(h('p', { class: 'enote', text: `Pick the release that matches yours (you have ${plural(tracks.length, 'track')}):` }),
+          ...j.releases.map(r => h('button', { class: 'mbrel' + (r.tracks === tracks.length ? ' fit' : ''), type: 'button', onclick: () => pick(r) },
+            h('b', { text: r.title }), h('span', { text: r.artist }),
+            h('i', { text: [r.date, r.country, r.format, plural(r.tracks, 'track'), r.type, r.note].filter(Boolean).join(' · ') }))));
+      } catch (e) { out.replaceChildren(h('div', { class: 'empty', text: e.message })); }
+    }
+    form.addEventListener('submit', e => { e.preventDefault(); search(); });
+
+    async function pick(r) {
+      out.replaceChildren(h('div', { class: 'loading', text: 'Reading the release…' }));
+      let rel;
+      try { rel = (await api('mb_release', { id: r.id })).release; } catch (e) { out.replaceChildren(h('div', { class: 'empty', text: e.message })); return; }
+      form.hidden = true;
+      const pairs = mbPairs(tracks, rel);
+      const matched = pairs.filter(p => p[1]).length;
+      const opt = (key, label, on, extra) => { const c = h('input', { type: 'checkbox', checked: on }); c.dataset.k = key; return h('label', { class: 'mbopt' }, c, ' ', label, extra || null); };
+      const yearSel = h('select', { class: 'mbyear' },
+        rel.firstYear && rel.firstYear !== rel.year ? h('option', { value: rel.firstYear, text: `${rel.firstYear} (first released)` }) : null,
+        rel.year ? h('option', { value: rel.year, text: `${rel.year} (this release)` }) : null);
+      const genre = rel.genres[0] ? titleCase(rel.genres[0]) : '';
+      const opts = h('div', { class: 'mbopts' },
+        opt('title', 'Track titles', true), opt('artist', 'Track artists', true), opt('no', 'Track and disc numbers', true),
+        opt('album', `Album: “${rel.title}”`, rel.title !== al0), opt('aa', `Album artist: ${rel.artist}`, rel.artist !== a0),
+        rel.year ? opt('year', 'Year: ', !tracks.some(t => t.year), yearSel) : null,
+        genre ? opt('genre', `Genre: ${genre}`, !tracks.some(t => t.genre)) : null,
+        rel.cover ? opt('cover', 'Cover', !tracks.some(t => t.cover), h('img', { class: 'mbthumb', src: rel.coverThumb, alt: '' })) : h('span', { class: 'enote', text: 'No cover on the Cover Art Archive for this one.' }));
+      const diff = (a, b) => (a === b ? h('span', { text: a || '—' }) : h('span', {}, h('s', { text: a || '—' }), ' → ', h('ins', { text: b })));
+      const table = h('div', { class: 'mbtable' }, pairs.map(([t, m]) => h('div', { class: 'mbtr' + (m ? '' : ' none') },
+        h('span', { class: 'n', text: m ? `${m.disc > 1 || rel.media.length > 1 ? m.disc + '.' : ''}${m.no}` : '–' }),
+        h('span', { class: 'tt' }, m ? diff(t.title, m.title) : h('span', { text: `${t.title} - no match` }),
+          m && m.artist && m.artist !== t.artist ? h('i', {}, diff(t.artist, m.artist)) : null),
+        h('span', { class: 'len' + (m && m.ms && t.ms && Math.abs(m.ms - t.ms) > 10000 ? ' warn' : ''), title: 'Length: yours / MusicBrainz',
+          text: m && m.ms ? `${fmtMs(t.ms)} / ${fmtMs(m.ms)}` : fmtMs(t.ms) }))));
+      const warn = matched < tracks.length || rel.media.reduce((n, m) => n + m.tracks.length, 0) !== tracks.length
+        ? h('p', { class: 'mbwarn', text: `The release has ${plural(rel.media.reduce((n, m) => n + m.tracks.length, 0), 'track')}, you have ${tracks.length}. Check the pairs below before applying.` }) : null;
+      out.replaceChildren(...[h('p', { class: 'enote' }, h('b', { text: rel.title }), ` · ${rel.artist} · `, h('a', { href: `https://musicbrainz.org/release/${rel.id}`, target: '_blank', rel: 'noopener', text: 'open on MusicBrainz' })),
+        warn, opts, table].filter(Boolean));
+      const back = h('button', { class: 'btn', type: 'button', text: '‹ Other releases', onclick: () => { form.hidden = false; search(); sh.foot.replaceChildren(cancel); } });
+      const apply = h('button', { class: 'btn go', type: 'button', text: 'Apply' });
+      sh.foot.replaceChildren(back, cancel, apply);
+      apply.addEventListener('click', async () => {
+        const on = k => { const c = opts.querySelector(`input[data-k="${k}"]`); return !!(c && c.checked); };
+        const items = pairs.filter(p => p[1]).map(([t, m]) => {
+          const set = { mb_release: rel.id, mb_recording: m.recording || null };
+          if (on('title')) set.title = m.title;
+          if (on('artist') && m.artist) set.artist = m.artist;
+          if (on('no')) { set.track_no = String(m.no); set.disc_no = rel.media.length > 1 ? String(m.disc) : ''; }
+          if (on('album')) set.album = rel.title;
+          if (on('aa')) set.album_artist = rel.artist;
+          if (on('year')) set.year = String(yearSel.value);
+          if (on('genre')) set.genre = genre;
+          return { id: t.id, set };
+        });
+        if (!items.length) { toast('Nothing matched to apply', true); return; }
+        try {
+          busy(apply, true, 'Applying…');
+          let list = (await apiPost('edit', { source: 'musicbrainz', items })).tracks;
+          if (on('cover')) {
+            try { list = (await apiPost('cover_mb', { track_ids: tracks.map(t => t.id), release: rel.id })).tracks; }
+            catch (e) { toast('Details saved, but the cover: ' + e.message, true); }
+          }
+          afterEdit(list, wasHash); sh.close(); toast(`Updated ${plural(items.length, 'track')} from MusicBrainz`);
+        } catch (e) { toast(e.message, true); busy(apply, false, 'Apply'); }
+      });
+    }
+    if (album.value.trim()) search(); else setTimeout(() => album.focus(), 30);
+  }
 
   // ------------------------------------------------------------------ views
   let viewSeq = 0;
@@ -1028,7 +1338,9 @@
       h('div', { class: 'pagehead' }, coverEl(cov ? cov.id : null), h('div', {},
         h('h1', { class: 'title', text: album || '(no album)' }),
         h('div', { class: 'subtitle' }, who ? h('a', { href: `#/artist/${enc(who)}`, text: who }) : (folder ? 'Various artists' : h('a', { href: `#/artist/${enc(artist)}`, text: artist })), year ? ` · ${year}` : '', ` · ${plural(tracks.length, 'track')} · ${longTime(ms)}`))),
-      actions(async () => tracks),
+      actions(async () => tracks, h('span', { class: 'grp' },
+        h('button', { class: 'btn', text: '✎ Edit', title: 'Edit the album and its tracks', onclick: () => editAlbum(tracks) }),
+        h('button', { class: 'btn', text: '⌕ MusicBrainz', title: 'Look this album up on MusicBrainz and fix its details and cover', onclick: () => findOnMB(tracks) }))),
       trackList(tracks, { noAlbum: true, albumArtist: who || undefined, trackNumbers: true, discs: true, inOrder: true }));
   }
 
@@ -1468,7 +1780,18 @@
 
   paintControls();
   paintPlay();
-  const start = () => { paintOffline(); route(); scanTick(); loadLiked(); };
+  // Saved tracks catch up with edits made since (another phone, the web page): once per start, when online.
+  async function refreshSaved() {
+    if (!OFF || !OFF.count || !OFF.refresh || (APP && !APP.key) || offlineOn()) return;
+    const ids = OFF.all().map(t => t.id);
+    try {
+      for (let i = 0; i < ids.length; i += 2000) {
+        const j = await apiPost('tracks_by_id', { ids: ids.slice(i, i + 2000) });
+        await OFF.refresh(j.tracks, dlCtx);
+      }
+    } catch (e) { /* offline: next time */ }
+  }
+  const start = () => { paintOffline(); route(); scanTick(); loadLiked(); refreshSaved(); };
   if (OFF) {
     OFF.init().then(() => { if (APP && !APP.key && OFF.count) mode.off = true; }).catch(() => {}).finally(start);
   } else start();
