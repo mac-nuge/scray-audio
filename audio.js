@@ -403,8 +403,9 @@
     set('pause', () => audio.pause());
     set('previoustrack', prev);
     set('nexttrack', () => next(false));
-    set('seekbackward', d => seekBy(-((d && d.seekOffset) || 10)));
-    set('seekforward', d => seekBy((d && d.seekOffset) || 10));
+    // No seekbackward/seekforward: iOS shows +/-10s on the lock screen whenever those exist, in place of previous/next.
+    set('seekbackward', null);
+    set('seekforward', null);
     set('seekto', d => { if (d && d.seekTime != null) audio.currentTime = d.seekTime; });
   }
 
