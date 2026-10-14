@@ -7,6 +7,12 @@ named `test:` until it has been tried and then `stable:`. Record the reasoning, 
 
 ## Entries
 
+### audio 1.8 — test: lock screen prev next and go-to panels
+<!-- 2026-10-14T11:55Z -->
+- **Why:** the lock screen and Control Centre showed skip -10s / +10s instead of previous / next track. iOS picks the seek buttons over previous/next whenever `seekbackward` / `seekforward` handlers are registered, and the page registered them (for desktop media keys).
+- **What:** `audio.js` clears those two handlers (`null`), so previous / next show. `seekto` stays, so the lock screen scrubber still works. The J / L keys on a keyboard still seek 10s. Also: "Go to album / artist / folder" now closes the queue and Offline panels, which on a phone covered most of the page it went to, so it looked like nothing happened.
+- **Deploy:** BBW Sounds bundles the page into the IPA, so the phone only gets this (and 1.7) from a new build. The web copy only gets it when the files are uploaded to the server: nothing deploys scray-audio's staging automatically. Untested on a phone.
+
 ### audio 1.7 — test: easier sign-in and go-to fixes
 <!-- 2026-10-14T11:40Z -->
 - **Why:** (1) the app's sign-in sheet was clunky: its styles (`.sa-*`) were never written, so it showed as a bare form at the bottom of the page, and it asked for everything at once. (2) "Go to album" / "Go to artist" misbehaved. When a track has no album-artist tag, the server uses the track's own artist as the album artist, so a compilation splits into one-track "albums", and "Go to album" opened just that one track.
