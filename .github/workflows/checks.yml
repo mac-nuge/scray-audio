@@ -26,6 +26,6 @@ jobs:
           node --check offline.js
           node --check app.js
           node --check tests/offline-parity.js
-          python3 -m py_compile gateway/scray-audio-scan.py tests/fake_box.py tests/smoke.py
+          python3 -m py_compile gateway/scray-audio-scan.py tests/fake_box.py tests/fake_mb.py tests/smoke.py
       - name: Smoke test
         run: python3 tests/smoke.py

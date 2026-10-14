@@ -13,7 +13,7 @@ from playwright.sync_api import sync_playwright
 shutil.rmtree(WORK, ignore_errors=True); os.makedirs(WORK)
 make_library()
 start([sys.executable, os.path.join(REPO, "tests", "fake_box.py"), BOX, str(BOX_PORT)])
-start(["php", "-S", f"0.0.0.0:{API_PORT}", "-t", REPO], {"SCRAY_AUDIO_DATA_DIR": os.path.join(REPO, "tests", "stub-data"), "SCRAY_AUDIO_TEST_DB": DB})
+start(["php", "-S", f"0.0.0.0:{API_PORT}", "-t", REPO], {**PHP_ENV, "SCRAY_AUDIO_TEST_DB": DB})
 assert wait_up(f"{API}?action=ping")
 scan()
 ok = True
@@ -45,7 +45,7 @@ INIT = """
       case 'manifestWrite': st.manifest = p.text; save(); return reply(m.id, true);
       case 'offlineFiles': return reply(m.id, Object.entries(st.files).filter(([k]) => !k.startsWith('.covers/')).map(([path, size]) => ({ path, size })));
       case 'storage': return reply(m.id, { free: 5e9, total: 64e9 });
-      case 'download': if (!/^http.*md5=/.test(p.url)) return window._saReject(m.id, 'not a signed link: ' + p.url);
+      case 'download': if (!/^http.*(md5=|action=art&.*s=)/.test(p.url)) return window._saReject(m.id, 'not a signed link: ' + p.url);
         st.files[p.path] = 1000; save(); return setTimeout(() => { window._saProgress('t0', 1000, 1000); window._saResolve(m.id, true); }, 20);
       case 'remove': p.paths.forEach(x => delete st.files[x]); save(); return reply(m.id, true);
       case 'cancel': return reply(m.id, true);
@@ -139,6 +139,23 @@ try:
         pg.click(".dbox button[type=submit]")
         pg.wait_for_function("document.querySelectorAll('.trk.off').length === 2", timeout=8000)
         chk("the whole album is saved", True)
+
+        # ---- edits made elsewhere reach the saved copies at the next start
+        import base64 as b64m
+        pg.wait_for_function("JSON.parse(window.__mock.manifest).tracks.length === 2", timeout=5000)   # the list is written a moment later
+        ids = pg.evaluate("JSON.parse(window.__mock.manifest).tracks.map(t => t.id)")
+        call("edit", body={"items": [{"id": ids[0], "set": {"title": "Edited Elsewhere"}}]})
+        jpg = open(os.path.join(BOX, "Music", "Artist One", "Album A", "cover.jpg"), "rb").read()
+        call("cover_upload", body={"track_ids": ids, "data": b64m.b64encode(jpg + b"\0").decode()})
+        pg.reload(); pg.wait_for_selector(".trk")
+        pg.wait_for_function("JSON.parse(window.__mock.manifest).tracks.some(t => t.title === 'Edited Elsewhere')", timeout=8000)
+        files = pg.evaluate("Object.keys(window.__mock.files)")
+        covers = [f for f in files if f.startswith(".covers/")]
+        chk("a saved track takes on an edit made elsewhere", True)
+        chk("...and swaps its cover for the new one (the old one removed)", len(covers) == 1 and "@" in covers[0], covers)
+        pg.click("#offbtn"); pg.wait_for_selector(".trk")
+        chk("...which Offline mode shows", "Edited Elsewhere" in pg.inner_text("#view"))
+        pg.click("#offbtn"); pg.wait_for_selector(".trk")
         pg.click(".bar .btn:has-text('Offline')"); pg.click(".cmenu .mi:has-text('Remove from offline')")
         pg.wait_for_selector(".dbox"); pg.click(".dbox button[type=submit]")
         pg.wait_for_function("document.querySelectorAll('.trk.off').length === 0", timeout=8000)

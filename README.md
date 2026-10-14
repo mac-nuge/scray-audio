@@ -104,6 +104,14 @@ sends the key it gets as `X-Scray-Key`. `api.php` accepts those keys by looking 
 (the same file, hashed, that Scray's twofactor.php manages), so signing a phone out there cuts it off here too. The API also
 sends CORS headers, because the app's page is not on the site's origin.
 
+**Editing details.** **Edit details…** in the track menu, and **✎ Edit** on an album page, change the title, artist, album,
+album artist, track/disc number, year, genre and cover. **⌕ MusicBrainz** on an album page looks the album up on
+[MusicBrainz](https://musicbrainz.org), lets you pick the release, shows what would change (old → new, lengths side by side) and
+applies the parts you tick, including the front cover from the Cover Art Archive. Edits are kept in the database on top of
+what the files' tags say: the files are not touched, a rescan doesn't undo them, and **Back to the file's tags** removes them.
+Covers you choose are saved in `scray-data/audio-covers/` and shown by a signed link. Saved (offline) tracks pick up edits
+the next time the app starts online. MusicBrainz is asked by the server at most once a second, and answers are kept a week.
+
 Supported: mp3, flac, m4a, aac, ogg, opus, wav - whatever the browser can decode. Safari doesn't play
 ogg/opus.
 
@@ -136,6 +144,7 @@ The first save asks for a folder; pick one in Files (On My iPhone is fine). Save
 ```bash
 python3 tests/smoke.py     # needs php, ffmpeg, python3-mutagen, node
 python3 tests/ui_offline.py   # optional: needs `pip install playwright` and a Chromium
+python3 tests/ui_edit.py      # likewise (also ui_library.py, ui_navigate.py)
 ```
 
 `tests/stub-data/` stands in for Scray's `scray_auth.php` / `scray_secrets.php`. `SCRAY_AUDIO_DATA_DIR`
