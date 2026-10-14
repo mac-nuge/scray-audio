@@ -52,7 +52,7 @@ def make_library():
     ff(os.path.join(BOX, "Music", "Singles", "loose track.mp3"), {}, "libmp3lame", "-b:a", "128k")
     ff(os.path.join(BOX, "Music", "Édith & Co's", "Café – live.mp3"), dict(title="Café", artist="Édith", album="Live", date="1960"), "libmp3lame", "-b:a", "128k")
     open(os.path.join(BOX, "Music", "notes.txt"), "w").write("not audio")
-    open(os.path.join(BOX, "Music", ".hidden.mp3"), "w").write("skip me")
+    open(os.path.join(BOX, "Music", "._Second.flac"), "w").write("macOS sidecar, not audio")
 
 
 def start(cmd, env=None):
@@ -113,7 +113,7 @@ def main():
     os.makedirs(WORK)
     print("making a little library")
     make_library()
-    start([sys.executable, os.path.join(REPO, "tests", "fake_box.py"), BOX, str(BOX_PORT)])
+    start([sys.executable, os.path.join(REPO, "tests", "fake_box.py"), BOX, str(BOX_PORT)], {"FAKE_DENY": "Locked Room"})
     start([sys.executable, os.path.join(REPO, "tests", "fake_mb.py"), str(MB_PORT)])
     start(["php", "-S", f"127.0.0.1:{API_PORT}", "-t", REPO], {**PHP_ENV, "SCRAY_AUDIO_TEST_DB": DB})
     assert wait_up(f"{API}?action=ping") and wait_up(f"http://127.0.0.1:{BOX_PORT}/x"), "servers did not start"
@@ -147,7 +147,9 @@ def main():
     print("   " + out.strip().splitlines()[-1])
     check("scan exits 0", code == 0, out)
     s = call("stats")[1]
-    check("6 audio files found (not the txt, not the dotfile)", s["tracks"] == 6, str(s))
+    check("6 audio files found (not the txt, not the ._ sidecar)", s["tracks"] == 6, str(s))
+    na = call("scan_status")[1]["not_added"]
+    check("the sidecar is listed as not added, with why", na["total"] == 1 and na["items"][0]["path"] == "Music/._Second.flac" and "sidecar" in na["items"][0]["why"], str(na))
     check("none left untagged", s["untagged"] == 0, str(s))
 
     code, out2 = scan()
@@ -494,7 +496,39 @@ def main():
     for n in os.listdir(odd):
         if n.startswith(("03 ", "04 ")):
             os.remove(os.path.join(odd, n))
+
+    m = os.path.join(BOX, "Music")
+    mp3 = lambda p, **t: ff(os.path.join(m, p), t, "libmp3lame", "-b:a", "128k")
+    mp3("@Home/01 - At Home.mp3", title="At Home", artist="Ats", album="@Home")
+    mp3("AC\\DC/Back in Black.mp3", title="Back in Black", artist="AC\\DC", album="Back")
+    mp3("Odd/05 What? #2.mp3", title="What", artist="Odd", album="Odd")
+    ff(os.path.join(m, "Odd", "06 Book.m4b"), dict(title="Book", artist="Reader", album="Audiobook"), "aac", "-f", "mp4")
+    ff(os.path.join(m, "Odd", "07 Sound.aiff"), dict(title="Sound", artist="Odd", album="Odd"), "pcm_s16be", "-write_id3v2", "1")
+    ff(os.path.join(m, "Odd", "09 Wave.wav"), dict(title="Wave", artist="Odd", album="Odd"), "pcm_s16le", "-write_id3v2", "1")
+    open(os.path.join(m, "Odd", "08 Old.wma"), "wb").write(b"0" * 100)
+    mp3("#recycle/Deleted.mp3", title="Deleted")
+    mp3("Locked Room/Hidden Away.mp3", title="Hidden Away")
+    code, out = scan()
+    r = {t["title"]: t for t in call("tracks", {"limit": 1000})[1]["tracks"]}
+    check("a folder starting with @ is a normal folder now", "At Home" in r)
+    check("a backslash stays part of the name", "Back in Black" in r and r["Back in Black"]["path"] == "Music/AC\\DC/Back in Black.mp3", str(r.get("Back in Black")))
+    check("...its folder opens", [t["title"] for t in call("tracks", {"folder": "Music/AC\\DC"})[1]["tracks"]] == ["Back in Black"])
+    check("“?” and “#” sent as they are stay in the name", "What" in r and r["What"]["path"] == "Music/Odd/05 What? #2.mp3", str(r.get("What")))
+    check("m4b (audiobooks) and AIFF go in, with their tags", r.get("Book", {}).get("artist") == "Reader" and r.get("Sound", {}).get("album") == "Odd", f"{r.get('Book')} {r.get('Sound')} {sorted(r)}")
+    check("WAV's tags are read now too", r.get("Wave", {}).get("artist") == "Odd", sorted(r))
+    for t in ("Back in Black", "What", "Book"):
+        u = call("url", {"id": r[t]["id"]})[1]
+        with urllib.request.urlopen(u["url"]) as resp:
+            check(f"...“{t}” plays ({u['mime']})", resp.status == 200 and len(resp.read()) > 1000)
+    check("a NAS recycle bin isn't walked", "Deleted" not in r)
+    na = {x["path"]: x for x in call("scan_status")[1]["not_added"]["items"]}
+    check("not added, with why: the WMA", "WMA" in na.get("Music/Odd/08 Old.wma", {}).get("why", ""), str(na))
+    check("...the folder the box wouldn't list", na.get("Music/Locked Room", {}).get("kind") == "folder" and "couldn't list" in na["Music/Locked Room"]["why"], str(na))
+    check("...the sidecar still; nothing else", set(na) == {"Music/._Second.flac", "Music/Odd/08 Old.wma", "Music/Locked Room"}, str(set(na)))
+    for p in ("@Home", "AC\\DC", "Odd", "#recycle", "Locked Room"):
+        shutil.rmtree(os.path.join(m, p))
     scan()
+    check("a complete scan replaces the list", set(x["path"] for x in call("scan_status")[1]["not_added"]["items"]) == {"Music/._Second.flac"})
 
     print("scan button and live progress")
     W = dict(cookie=False, worker="test-worker-key")

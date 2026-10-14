@@ -134,8 +134,11 @@ Once written, the edits that now match the file are dropped (the file says it no
 your edits back as they were. To turn it on: copy the new `gateway/scray-audio-scan.py` to `/opt/scray/`, add the line to the
 env file - nothing to restart, the poll timer picks it up.
 
-Supported: mp3, flac, m4a, aac, ogg, opus, wav - whatever the browser can decode. Safari doesn't play
-ogg/opus.
+Supported: mp3, flac, m4a, m4b (audiobooks), aac, ogg, opus, wav, aiff - whatever the browser can decode (Safari doesn't play
+ogg/opus; Chrome doesn't play aiff). Nothing else that is audio is left out silently: the scan panel lists **Not added**, by
+name, with why - formats nothing here can play (wma, ape, wavpack, dsd, ...), macOS `._` sidecar files, and folders the box
+wouldn't list - and **Added, but its tags couldn't be read**. Only a NAS's or computer's own housekeeping folders (`@eaDir`,
+`#recycle`, `.Trash`, `$RECYCLE.BIN`, ...) aren't walked.
 
 ## The iOS app (BBW Sounds)
 

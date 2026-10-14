@@ -1670,6 +1670,17 @@
     }
     row('Tracks in library', (st.tracks || 0).toLocaleString());
 
+    // what the last scan found but didn't add, and what went in without its tags: by name, with why
+    const lists = $('scanlists');
+    const list = (o, title, open) => {
+      if (!o || !o.total) return null;
+      return h('details', { class: 'slist', open: open || null },
+        h('summary', { text: `${title} (${o.total.toLocaleString()})` }),
+        h('ul', {}, o.items.map(x => h('li', {}, h('b', { text: x.path + (x.kind === 'folder' ? '/' : '') }), h('i', { text: x.why || '' })))),
+        o.total > o.items.length ? h('p', { class: 'smsg dim', text: `…and ${(o.total - o.items.length).toLocaleString()} more` }) : null);
+    };
+    if (st.state !== 'running') lists.replaceChildren(...[list(st.not_added, 'Not added', true), list(st.no_tags, 'Added, but its tags couldn’t be read')].filter(Boolean));
+
     // warning: nobody home
     const warn = $('scanwarn');
     const offline = (st.state === 'requested' || st.state === 'starting') && !st.worker_online;

@@ -328,6 +328,12 @@ CREATE INDEX IF NOT EXISTS mb_bulk_state ON mb_bulk(state, run_id);
 SQL);
         $db->exec('PRAGMA user_version = 7');
         $db->commit();
+        $ver = 7;
+    }
+    if ($ver < 8) {
+        // What the last scan found but didn't add (and folders it couldn't read), with why. The scan panel lists them.
+        $db->exec('CREATE TABLE IF NOT EXISTS scan_not_added (path TEXT PRIMARY KEY, kind TEXT, why TEXT, scan_id INTEGER, at TEXT)');
+        $db->exec('PRAGMA user_version = 8');
     }
     return $db;
 }
@@ -369,7 +375,8 @@ function audioTtl(array $secrets): int {
 }
 
 const AUDIO_MIME = [
-    'mp3' => 'audio/mpeg', 'flac' => 'audio/flac', 'm4a' => 'audio/mp4', 'aac' => 'audio/aac',
+    'mp3' => 'audio/mpeg', 'flac' => 'audio/flac', 'm4a' => 'audio/mp4', 'm4b' => 'audio/mp4', 'aac' => 'audio/aac',
+    'aif' => 'audio/aiff', 'aiff' => 'audio/aiff',
     'ogg' => 'audio/ogg', 'oga' => 'audio/ogg', 'opus' => 'audio/ogg; codecs=opus', 'wav' => 'audio/wav',
 ];
 
@@ -382,7 +389,8 @@ function likeEsc(string $s): string {
 }
 
 function cleanPath(string $p): string {
-    $p = trim(str_replace('\\', '/', $p), '/');
+    // A backslash is an ordinary character in a name on the box ("AC\DC"), not a separator.
+    $p = trim($p, '/');
     if (preg_match('#(^|/)\.\.(/|$)#', $p)) fail(400, 'bad path');
     return preg_replace('#/+#', '/', $p);
 }
@@ -1162,8 +1170,12 @@ function scanStatus(PDO $db): array {
         $scan['stale'] = $stale;
         $scan['beat_age'] = $beat;
     }
+    $notAdded = run($db, 'SELECT path, kind, why FROM scan_not_added ORDER BY kind DESC, path LIMIT 500')->fetchAll();
+    $noTags = run($db, "SELECT path, tag_error AS why FROM tracks WHERE deleted = 0 AND tag_error IS NOT NULL ORDER BY path LIMIT 500")->fetchAll();
     return [
         'ok' => true, 'state' => $state, 'scan' => $scan, 'expected' => $expected,
+        'not_added' => ['total' => (int)run($db, 'SELECT COUNT(*) FROM scan_not_added')->fetchColumn(), 'items' => $notAdded],
+        'no_tags' => ['total' => (int)run($db, 'SELECT COUNT(*) FROM tracks WHERE deleted = 0 AND tag_error IS NOT NULL')->fetchColumn(), 'items' => $noTags],
         'tracks' => (int)run($db, 'SELECT COUNT(*) FROM tracks WHERE deleted = 0')->fetchColumn(),
         'worker_age' => $seen, 'worker_online' => $running || ($seen !== null && $seen < WORKER_SEEN_SECS),
     ];
@@ -1992,6 +2004,17 @@ case 'audio_worker_finish': {
         } else {
             $pruned = run($db, 'UPDATE tracks SET deleted = 1, updated_at = :n WHERE deleted = 0 AND scan_id IS NOT :s',
                           [':n' => gmdate('c'), ':s' => $scan])->rowCount();
+        }
+    }
+    if (isset($in['not_added']) && is_array($in['not_added'])) {
+        // this scan's list replaces the last one's, for the part of the box it walked
+        $root = cleanPath((string)($in['root'] ?? ''));
+        if ($root === '') run($db, 'DELETE FROM scan_not_added');
+        else run($db, 'DELETE FROM scan_not_added WHERE path = :r OR substr(path, 1, :n) = :p', [':r' => $root, ':p' => $root . '/', ':n' => mb_strlen($root . '/', 'UTF-8')]);
+        $ins = $db->prepare('INSERT OR REPLACE INTO scan_not_added(path, kind, why, scan_id, at) VALUES (:p, :k, :w, :s, :a)');
+        foreach (array_slice($in['not_added'], 0, 5000) as $x) {
+            $ins->execute([':p' => mb_substr((string)($x['path'] ?? ''), 0, 1000, 'UTF-8'), ':k' => ($x['kind'] ?? '') === 'folder' ? 'folder' : 'file',
+                           ':w' => mb_substr((string)($x['why'] ?? ''), 0, 300, 'UTF-8'), ':s' => $scan, ':a' => gmdate('c')]);
         }
     }
     $err  = substr(trim((string)($in['error'] ?? '')), 0, 300);

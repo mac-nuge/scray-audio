@@ -7,6 +7,17 @@ named `test:` until it has been tried and then `stable:`. Record the reasoning, 
 
 ## Entries
 
+### audio 1.16 — test: no audio skipped, list what is not added
+<!-- 2026-10-14T20:10Z -->
+- **Why:** after the `;` fix: don't skip any audio file, or say which and why. The scanner skipped some silently: every name starting with "." or "@" (meant for NAS folders like @eaDir, but it caught a real "@Home" album too); a name with "?" or "#" if the box sends them unescaped (same cause as `;`); unsupported formats (wma, ape, ...); folders the box wouldn't list (only in the gateway's log). A backslash in a name ("AC\DC") was turned into "/" by api.php, so such a track was listed but couldn't play. And WAV / AIFF tags were never read (they're ID3 frames or a RIFF INFO block, which the reader didn't look at).
+- **What:**
+  - **Scanner:** only real housekeeping folders are left out (@eaDir, @Recycle, @tmp, #recycle, #snapshot, $RECYCLE.BIN, System Volume Information, .Trash(es), .Spotlight-V100, .fseventsd, .AppleDouble, lost+found...); everything else is walked, "@" and "." included. Every audio file goes in, hidden ones too, except macOS `._` sidecars (not audio). Hrefs are read as plain paths (no URL splitting at all), so ";", "?" and "#" stay. m4b and aif / aiff are now taken (m4b written like m4a). WAV tags from ID3 or RIFF INFO, AIFF from ID3. Audio it can't take (wma, ape, wv, dsf / dff, mka, mpc, tta, ra / rm, ac3, dts, amr, caf, mid, mp2) and folders it couldn't list go to api.php with the reason.
+  - **api.php:** `cleanPath` keeps backslashes. MIME types for m4b and aiff. Schema v8 `scan_not_added`, replaced by each scan for the part it walked. `scan_status` returns `not_added` and `no_tags` (tracks whose tags couldn't be read, with the error), 500 of each.
+  - **Page:** the scan panel lists them: "Not added" (open), "Added, but its tags couldn't be read" (folded), each name with why. The panel scrolls when long.
+  - **App:** saved m4b / aiff files play from the phone (MIME types in the Swift scheme handler) - needs the new IPA.
+- **Tested:** `smoke.py`: the test box now sends ";", "?" and "#" unescaped and can refuse a folder; a `._` sidecar, an "@Home" folder, "AC\DC", "What? #2", an m4b, an AIFF and a WAV with tags, a WMA, a #recycle folder and a locked folder: each where it should be, the playable ones played through signed links, the list right, and replaced by the next full scan. All other suites pass.
+- **To use:** upload `api.php`, `index.php`, `audio.js`, `audio.css`; copy the new `gateway/scray-audio-scan.py` to `/opt/scray/`; scan. New IPA for saved m4b / aiff.
+
 ### audio 1.15 — test: semicolon in file names
 <!-- 2026-10-14T19:45Z -->
 - **Why:** "02 Cantus II; In Memory of Warren Wiltzie.mp3" never appeared in the library. The scanner read the box's folder listing with Python's `urlparse`, which treats a `;` in a path as the start of old-style URL "parameters" and cuts the path there. When the box sends the `;` unescaped (allowed in a URL path), the name became "02 Cantus II", with no extension, so it wasn't taken for audio and was skipped without a word.

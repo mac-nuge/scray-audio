@@ -5,7 +5,8 @@ A stand-in for the Storage Box + gateway, for tests.
   python3 fake_box.py ROOT PORT
 
   - WebDAV (PROPFIND depth 0/1, ranged GET, PUT, MOVE, DELETE) with Basic auth u:p, like the box.
-    FAKE_READONLY=1 refuses writes (403), like a read-only sub-account.
+    FAKE_READONLY=1 refuses writes (403), like a read-only sub-account. FAKE_DENY=<text> refuses to list
+    folders whose path has it. Hrefs keep ";", "?" and "#" unescaped, as a real server may.
   - /a/<path>?md5=&expires=  with the gateway's secure_link check, like nginx.
 """
 import base64, hashlib, os, sys, time, urllib.parse
@@ -83,10 +84,12 @@ class H(BaseHTTPRequestHandler):
         if n:
             self.rfile.read(n)
         path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
+        if os.environ.get("FAKE_DENY") and os.environ["FAKE_DENY"] in path:   # a folder the box won't list
+            return self.send(403)
         p = self.real(path.strip("/"))
         if p and os.path.isfile(p):                      # Depth 0 on a file
             st = os.stat(p)
-            body = ('<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:"><D:response><D:href>' + urllib.parse.quote(path, safe="/;")
+            body = ('<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:"><D:response><D:href>' + urllib.parse.quote(path, safe="/;?#")
                     + f'</D:href><D:propstat><D:prop><D:resourcetype/><D:getcontentlength>{st.st_size}</D:getcontentlength>'
                     + f'<D:getetag>"{st.st_size:x}-{st.st_mtime_ns:x}"</D:getetag><D:getlastmodified>x</D:getlastmodified></D:prop>'
                     + '<D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response></D:multistatus>').encode()
@@ -96,9 +99,9 @@ class H(BaseHTTPRequestHandler):
         # like a real WebDAV server may, ";" comes back as it is (it is allowed in a path)
         def resp(href, p2):
             if os.path.isdir(p2):
-                return f"<D:response><D:href>{urllib.parse.quote(href, safe="/;")}</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>"
+                return f"<D:response><D:href>{urllib.parse.quote(href, safe="/;?#")}</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>"
             st = os.stat(p2)
-            return (f"<D:response><D:href>{urllib.parse.quote(href, safe="/;")}</D:href><D:propstat><D:prop><D:resourcetype/>"
+            return (f"<D:response><D:href>{urllib.parse.quote(href, safe="/;?#")}</D:href><D:propstat><D:prop><D:resourcetype/>"
                     f"<D:getcontentlength>{st.st_size}</D:getcontentlength><D:getetag>\"{st.st_size:x}-{st.st_mtime_ns:x}\"</D:getetag>"
                     f"<D:getlastmodified>x</D:getlastmodified></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>")
         base = "/" + path.strip("/") + ("/" if path.strip("/") else "")
