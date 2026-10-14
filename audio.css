@@ -474,3 +474,17 @@ input[type="range"]::-moz-range-thumb { width: 14px; height: 14px; border-radius
   .etracks.discs .etr .dinput:nth-child(2) { grid-column: 1; grid-row: 2; }
   .eth span:nth-last-child(1) { display: none; }
 }
+
+/* ---- write to files */
+.gw { margin: 4px 0 12px; padding: 9px 12px; border-radius: 8px; font-size: 13px; }
+.gw.ok { background: rgba(76, 195, 138, .12); color: #4cc38a; }
+.gw.warn { background: rgba(255, 180, 84, .12); color: #ffb454; }
+.wtr { padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+.wtr > b { display: block; margin-bottom: 2px; }
+.whats { display: flex; flex-direction: column; gap: 2px; color: var(--dim); }
+.wch s { color: var(--dim); }
+.wch ins { text-decoration: none; color: var(--accent); }
+.wst { display: inline-block; margin-top: 4px; font-size: 12px; color: var(--dim); }
+.wst.done { color: #4cc38a; }
+.wst.failed { color: var(--danger); }
+.wst.working, .wst.queued { color: #ffb454; }

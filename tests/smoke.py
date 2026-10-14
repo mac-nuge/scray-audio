@@ -395,6 +395,61 @@ def main():
     call("edit_reset", body={"track_ids": [sec, byname["First"]]})
     check("after reset the folder art is back", call("tracks_by_id", body={"ids": [sec]})[1]["tracks"][0]["coverv"] == "f")
 
+    print("writing edits into the files")
+    import mutagen
+    sec_path = os.path.join(BOX, "Music", "Artist One", "Album A", "02 - Second.flac")
+    tune_path = os.path.join(BOX, "Music", "Various", "Compilation", "01 - Tune.mp3")
+    call("edit", body={"items": [{"id": sec, "set": {"title": "Second Wind", "year": 2001}},
+                                 {"id": byname["Tune"], "set": {"album_artist": "Compilers", "track_no": 7}}]})
+    call("cover_upload", body={"track_ids": [byname["Tune"]], "data": b64m.b64encode(jpg).decode()})
+    st, j = call("push_status", {"ids": f"{sec},{byname['Tune']},{byname['First']}"})
+    by = {t["id"]: t for t in j["tracks"]}
+    check("push_status lists what writing would change", by[sec]["changes"] == {"title": "Second Wind", "year": "2001"} and by[byname["Tune"]]["cover"]
+          and by[byname["First"]]["changes"] == {} and not by[byname["First"]]["cover"], str(j)[:500])
+    check("...and that the gateway hasn't said it may write", j["gateway"]["can_write"] is False)
+    st, j = call("push_request", body={"track_ids": [sec, byname["Tune"], byname["First"]]})
+    check("asking queues only the files with changes", st == 200 and j["queued"] == 2, str(j))
+    check("asking twice doesn't double up", call("push_request", body={"track_ids": [sec]})[1]["queued"] == 0)
+    code, out = scan(args=["--poll"])
+    check("a gateway without SCRAY_WRITE_TAGS leaves them queued", code == 0 and mutagen.File(sec_path)["title"] == ["Second"]
+          and call("push_status", {"ids": str(sec)})[1]["tracks"][0]["job"]["state"] == "queued", out)
+    check("...and says it can't write", call("push_status", {"ids": str(sec)})[1]["gateway"]["can_write"] is False)
+    code, out = scan({"SCRAY_WRITE_TAGS": "1"}, ["--poll"])
+    f = mutagen.File(sec_path); m = mutagen.File(tune_path)
+    check("the gateway writes the flac", code == 0 and f["title"] == ["Second Wind"] and f["date"] == ["2001"] and f["tracknumber"] == ["2/2"], out + str(f.tags))
+    check("...and the mp3, keeping the old track total shape, with the cover inside", str(m.tags["TPE2"]) == "Compilers" and str(m.tags["TRCK"]).startswith("7")
+          and m.tags.getall("APIC") and m.tags.getall("APIC")[0].data == jpg, str(m.tags))
+    check("no temporary copies left behind", not [n for n in os.listdir(os.path.dirname(sec_path)) if n.endswith(".scray-tmp")])
+    i = call("track_info", {"id": sec})[1]
+    check("the edits that are now in the file go; what shows stays", "title" not in i["edits"] and i["file"]["title"] == "Second Wind" and i["track"]["title"] == "Second Wind"
+          and i["track"]["year"] == 2001, str(i)[:400])
+    i = call("track_info", {"id": byname["Tune"]})[1]
+    check("a chosen cover stays chosen (the app still shows it)", "cover" in i["edits"] and i["track"]["coverv"] not in ("", "f"))
+    st, j = call("push_status", {"ids": f"{sec},{byname['Tune']}"})
+    check("nothing left to write, and it can be undone", all(t["changes"] == {} and not t["cover"] and t["undo"] and t["job"]["state"] == "done" for t in j["tracks"]), str(j)[:400])
+    code, out = scan()
+    check("a full rescan afterwards changes nothing that shows", call("tracks_by_id", body={"ids": [sec]})[1]["tracks"][0]["title"] == "Second Wind")
+    st, j = call("push_undo", body={"track_ids": [sec, byname["Tune"]]})
+    check("undo queues both", j["queued"] == 2, str(j))
+    code, out = scan({"SCRAY_WRITE_TAGS": "1"}, ["--poll"])
+    f = mutagen.File(sec_path); m = mutagen.File(tune_path)
+    check("undo puts the files back (and takes out the cover it added)", f["title"] == ["Second"] and f["date"] == ["1999"]
+          and str(m.tags["TPE2"]) == "Various Artists" and not m.tags.getall("APIC"), out + str(f.tags) + str(m.tags))
+    i = call("track_info", {"id": sec})[1]
+    check("...and the edits as they were, so the app shows the same as before writing", i["edits"]["title"]["value"] == "Second Wind" and i["track"]["title"] == "Second Wind"
+          and i["file"]["title"] == "Second", str(i)[:400])
+    check("...so it could be written again", call("push_status", {"ids": str(sec)})[1]["tracks"][0]["changes"] == {"title": "Second Wind", "year": "2001"})
+    call("push_request", body={"track_ids": [sec]})
+    time.sleep(0.05)
+    ff(sec_path, dict(title="Changed Meanwhile", artist="Artist One", album="Album A", track="2/2", date="1999", genre="Drone"), "flac")
+    code, out = scan({"SCRAY_WRITE_TAGS": "1"}, ["--poll"])
+    j = call("push_status", {"ids": str(sec)})[1]["tracks"][0]["job"]
+    check("a file changed since the last scan isn't touched", j["state"] == "failed" and "changed" in j["error"] and mutagen.File(sec_path)["title"] == ["Changed Meanwhile"], str(j))
+    call("edit_reset", body={"track_ids": [sec, byname["Tune"]]})
+    scan()
+    with sqlite3.connect(DB) as c:                       # the scan-button tests below expect a gateway that never polled
+        c.execute("DELETE FROM meta WHERE k IN ('worker_seen_at', 'push_can_write')")
+
     print("files that go away")
     os.remove(os.path.join(BOX, "Music", "Singles", "loose track.mp3"))
     code, out = scan()

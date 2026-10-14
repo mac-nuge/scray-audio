@@ -7,6 +7,17 @@ named `test:` until it has been tried and then `stable:`. Record the reasoning, 
 
 ## Entries
 
+### audio 1.13 — test: write edits to files
+<!-- 2026-10-14T17:10Z -->
+- **Why:** the "option B" half of the metadata request: be able to push edits (made by hand or from MusicBrainz) into the music files themselves, on purpose, per album, with a way back.
+- **What:**
+  - **Schema v6:** `push_jobs` (one per file: the changes to make, a cover to put inside, what the file's tags and your edits were before, state, error) and `tracks.cover_pushed`.
+  - **api.php:** `push_status` (per track: what writing would change, its last job, whether it can be undone; and whether the gateway is online and allowed to write), `push_request`, `push_undo`. For the gateway: `audio_worker_poll` now also says how many files wait and records whether the gateway may write; `audio_worker_push_next` hands out up to 10 jobs with a signed link to the cover; `audio_worker_push_done` records the result. After a write, the file's tags are what was written, so the edits that now match it are dropped (the chosen cover stays chosen, as the scanner doesn't read covers inside files). Undo writes the old values back, takes out a picture it had put in a file that had none, and restores your edits as they were. A job left "working" for 30 minutes is marked failed.
+  - **Gateway (`scray-audio-scan.py --poll`):** off unless `SCRAY_WRITE_TAGS=1`. Per file: PROPFIND to check it hasn't changed since the last scan (etag), download it, write only the changed tags with mutagen (mp3 ID3, flac / ogg / opus Vorbis comments, m4a atoms; a track number keeps its total), put the cover in, read the tags back to check, PUT the result as `.<name>.scray-tmp` beside it, check its size, MOVE it over the original. A failure before the MOVE leaves the original untouched and deletes the temporary copy. Files bigger than `SCRAY_WRITE_MAX_MB` (600) are refused. wav / aac can't be written and are skipped with a reason.
+  - **Page:** "⇪ Write to files" on an album page once it has edits: what changes in each file (old → new, cover), the gateway's state, Write (asks first), live progress, Undo last write.
+- **Tested:** `smoke.py` (against the fake box, now with PUT / MOVE / DELETE / Depth-0 PROPFIND): flac and mp3 written and read back with mutagen, cover inside, no temporary copies left, edits dropped, rescan afterwards, undo of tags, cover and edits, a file changed meanwhile refused and untouched, and nothing written while the gateway isn't allowed. m4a / ogg / opus writing checked by hand with mutagen. `tests/ui_edit.py` drives the page through write and undo. Not tried against the real Storage Box: its WebDAV is assumed to accept PUT and MOVE for the scanning sub-account.
+- **To turn on:** copy the new `gateway/scray-audio-scan.py` to `/opt/scray/`, add `SCRAY_WRITE_TAGS=1` to `/etc/scray/audio-scan.env`. Needs the new `api.php` uploaded.
+
 ### audio 1.12 — test: edit details, musicbrainz, covers
 <!-- 2026-10-14T16:10Z -->
 - **Why:** asked to edit track details by hand and to correct them (and bring in album art) from a free database. Chosen: keep the edits in the library's database (option A), with writing them into the files (option B) as a later, deliberate step, since BBW Sounds is the only player of these files.

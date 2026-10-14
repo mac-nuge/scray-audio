@@ -112,6 +112,16 @@ what the files' tags say: the files are not touched, a rescan doesn't undo them,
 Covers you choose are saved in `scray-data/audio-covers/` and shown by a signed link. Saved (offline) tracks pick up edits
 the next time the app starts online. MusicBrainz is asked by the server at most once a second, and answers are kept a week.
 
+**Writing edits into the files.** **⇪ Write to files** on an album page (shown once it has edits) lists what would change in
+each file and queues it. The gateway does the writing, and only when `SCRAY_WRITE_TAGS=1` is in `/etc/scray/audio-scan.env`
+(off by default; the scanning sub-account must not be read-only). Every 30 s `scray-audio-scan.py --poll` takes the queue:
+for each file it checks the file hasn't changed since the last scan, downloads it, writes the tags (and the chosen cover,
+inside the file) with mutagen, reads them back, uploads the result beside the original as `.<name>.scray-tmp`, checks its
+size, and only then moves it over the original. mp3, flac, m4a, ogg and opus; a track number keeps its old total (2/12).
+Once written, the edits that now match the file are dropped (the file says it now). **Undo last write** puts the files and
+your edits back as they were. To turn it on: copy the new `gateway/scray-audio-scan.py` to `/opt/scray/`, add the line to the
+env file - nothing to restart, the poll timer picks it up.
+
 Supported: mp3, flac, m4a, aac, ogg, opus, wav - whatever the browser can decode. Safari doesn't play
 ogg/opus.
 
