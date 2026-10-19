@@ -334,6 +334,27 @@ SQL);
         // What the last scan found but didn't add (and folders it couldn't read), with why. The scan panel lists them.
         $db->exec('CREATE TABLE IF NOT EXISTS scan_not_added (path TEXT PRIMARY KEY, kind TEXT, why TEXT, scan_id INTEGER, at TEXT)');
         $db->exec('PRAGMA user_version = 8');
+        $ver = 8;
+    }
+    if ($ver < 9) {
+        // What you have played, on any device. uid is made by the page, so a play sent twice (it was offline,
+        // the answer got lost) is kept once. The track's details are copied in, so a play still reads right
+        // after the file is moved or deleted.
+        $db->beginTransaction();
+        $db->exec(<<<'SQL'
+CREATE TABLE IF NOT EXISTS plays (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  uid TEXT UNIQUE,
+  track_id INTEGER NOT NULL,
+  played_at TEXT NOT NULL,
+  device TEXT,
+  title TEXT, artist TEXT, album TEXT
+);
+CREATE INDEX IF NOT EXISTS plays_at ON plays(played_at);
+CREATE INDEX IF NOT EXISTS plays_track ON plays(track_id);
+SQL);
+        $db->exec('PRAGMA user_version = 9');
+        $db->commit();
     }
     return $db;
 }
@@ -1682,6 +1703,57 @@ case 'cover_upload': {
     trackApply($db, $ids);
     $db->commit();
     jsonOut(['ok' => true, 'tracks' => shapeById($db, $ids)]);
+}
+
+// ---- history: everything played, on every device -----------------------------
+// play_log: plays[] of {uid, track_id, at, device}. A play the page heard back about once is not counted again.
+case 'play_log': {
+    if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') fail(405, 'POST only');
+    $plays = $in['plays'] ?? null;
+    if (!is_array($plays) || !$plays) fail(400, 'plays[] needed');
+    if (count($plays) > 2000) fail(400, 'too many at once');
+    $db->beginTransaction();
+    $one = $db->prepare('SELECT title, artist, album, filename FROM tracks WHERE id = :i');
+    $ins = $db->prepare('INSERT OR IGNORE INTO plays(uid, track_id, played_at, device, title, artist, album) VALUES (:u, :t, :a, :d, :ti, :ar, :al)');
+    $n = 0;
+    foreach ($plays as $p) {
+        $tid = (int)($p['track_id'] ?? 0);
+        $uid = preg_replace('/[^A-Za-z0-9_-]/', '', (string)($p['uid'] ?? '')) ?: bin2hex(random_bytes(8));
+        $at = strtotime((string)($p['at'] ?? '')) ?: time();
+        if ($at > time() + 300) $at = time();                    // a phone with its clock wrong
+        $one->execute([':i' => $tid]);
+        $t = $one->fetch();
+        if (!$t) continue;
+        $ins->execute([':u' => substr($uid, 0, 64), ':t' => $tid, ':a' => gmdate('c', $at), ':d' => mb_substr((string)($p['device'] ?? ''), 0, 60, 'UTF-8'),
+                       ':ti' => (string)($t['title'] ?: pathinfo((string)$t['filename'], PATHINFO_FILENAME)), ':ar' => (string)$t['artist'], ':al' => (string)$t['album']]);
+        $n += $ins->rowCount();
+    }
+    $db->commit();
+    jsonOut(['ok' => true, 'added' => $n]);
+}
+
+// history: newest first, 100 at a time (offset = how many you have). Tracks still in the library come as tracks.
+case 'history': {
+    $off = max(0, (int)($_GET['offset'] ?? 0));           // by offset: plays sent late (offline) slot in by when they happened
+    $limit = max(1, min(500, (int)($_GET['limit'] ?? 100)));
+    $rows = run($db, 'SELECT id, uid, track_id, played_at, device, title, artist, album FROM plays ORDER BY played_at DESC, id DESC LIMIT :l OFFSET :o',
+                [':l' => $limit, ':o' => $off])->fetchAll();
+    $live = [];
+    foreach (shapeById($db, array_map(static fn($r) => (int)$r['track_id'], $rows)) as $t) $live[$t['id']] = $t;
+    $out = array_map(static fn($r) => ['id' => (int)$r['id'], 'at' => $r['played_at'], 'device' => (string)$r['device'],
+        'track' => $live[(int)$r['track_id']] ?? null,
+        'was' => ['id' => (int)$r['track_id'], 'title' => (string)$r['title'], 'artist' => (string)$r['artist'], 'album' => (string)$r['album']]], $rows);
+    jsonOut(['ok' => true, 'plays' => $out, 'total' => (int)run($db, 'SELECT COUNT(*) FROM plays')->fetchColumn()]);
+}
+
+// history_remove: ids[] to forget; all: true forgets the lot.
+case 'history_remove': {
+    if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') fail(405, 'POST only');
+    if (!empty($in['all'])) { $n = run($db, 'DELETE FROM plays')->rowCount(); jsonOut(['ok' => true, 'removed' => $n]); }
+    $ids = plIds($in['ids'] ?? null, 'ids');
+    $n = 0;
+    foreach ($ids as $i) $n += run($db, 'DELETE FROM plays WHERE id = :i', [':i' => $i])->rowCount();
+    jsonOut(['ok' => true, 'removed' => $n]);
 }
 
 // ---- liked: the built-in playlist the hearts add to -----------------------
