@@ -415,6 +415,7 @@
   function paintRange(el) { el.style.setProperty('--fill', (el.value - el.min) / (el.max - el.min) * 100 + '%'); }
 
   function paintNow(t) {
+    heardReset(t);
     paintNowInfo(t);
     $('tdur').textContent = fmtMs(t.ms);
     $('tcur').textContent = '0:00';
@@ -507,6 +508,119 @@
   document.addEventListener('visibilitychange', () => { if (!document.hidden) armMediaSession(); });
   window.addEventListener('pageshow', armMediaSession);
 
+  // ------------------------------------------------------------ history
+  // A play counts once it has really been heard: 30 s, or half of a shorter track (seeking doesn't count).
+  // Plays go to the server (play_log), so the history is the same everywhere; one that can't be sent yet (offline)
+  // waits on this device and goes later, with the time it happened. Each has its own uid, so none is counted twice.
+  const H = { t: null, heard: 0, last: null, logged: false, pending: store.get('playsPending', []), sending: false, rows: [], total: 0, open: false };
+  const deviceName = () => (APP ? (APP.name || 'iPhone') : /iPhone|iPad/.test(navigator.userAgent) ? 'iPhone browser' : /Android/.test(navigator.userAgent) ? 'Android browser' : 'Computer');
+  const uid = () => { const a = new Uint8Array(12); crypto.getRandomValues(a); return [...a].map(b => b.toString(16).padStart(2, '0')).join(''); };
+  function heardReset(t) { H.t = t; H.heard = 0; H.last = null; H.logged = false; }
+  audio.addEventListener('timeupdate', () => {
+    const t = H.t;
+    if (!t || H.logged || audio.paused || audio.src.startsWith('data:')) return;
+    const cur = audio.currentTime;
+    if (H.last != null) { const d = cur - H.last; if (d > 0 && d < 1.5) H.heard += d; }
+    H.last = cur;
+    const dur = isFinite(audio.duration) && audio.duration > 0 ? audio.duration : (t.ms || 0) / 1000;
+    if (H.heard >= Math.min(30, dur > 0 ? dur / 2 : 30)) { H.logged = true; logPlay(t); }
+  });
+  audio.addEventListener('seeking', () => { H.last = null; });
+  audio.addEventListener('ended', () => { if (P.repeat === 'one') { H.heard = 0; H.last = null; H.logged = false; } });   // each repeat is a play
+
+  function logPlay(t) {
+    H.pending.push({ uid: uid(), track_id: t.id, at: new Date().toISOString(), device: deviceName(), t });
+    if (H.pending.length > 5000) H.pending.splice(0, H.pending.length - 5000);
+    store.set('playsPending', H.pending);
+    sendPlays().then(() => { if (H.open) loadHistory(); });
+    if (H.open) paintHistory();
+  }
+  async function sendPlays() {
+    if (H.sending || !H.pending.length || (APP && !APP.key)) return;
+    H.sending = true;
+    try {
+      while (H.pending.length) {
+        const batch = H.pending.slice(0, 500);
+        await apiPost('play_log', { plays: batch.map(({ t, ...p }) => p) });
+        const sent = new Set(batch.map(p => p.uid));
+        H.pending = H.pending.filter(p => !sent.has(p.uid));
+        store.set('playsPending', H.pending);
+      }
+    } catch (e) { /* offline or signed out: they wait here and go next time */ }
+    H.sending = false;
+  }
+  window.addEventListener('online', () => sendPlays());
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) sendPlays(); });
+  setInterval(() => { if (H.pending.length) sendPlays(); }, 120000);
+
+  const dayOf = iso => {
+    const d = new Date(iso), today = new Date(); today.setHours(0, 0, 0, 0);
+    const day = new Date(d); day.setHours(0, 0, 0, 0);
+    const diff = Math.round((today - day) / 86400000);
+    return diff === 0 ? 'Today' : diff === 1 ? 'Yesterday' : d.toLocaleDateString(undefined, { weekday: diff < 7 ? 'long' : undefined, day: 'numeric', month: 'long', year: day.getFullYear() === today.getFullYear() ? undefined : 'numeric' });
+  };
+  const clockOf = iso => new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+
+  function setHistPanel(open) {
+    H.open = open;
+    $('histpanel').hidden = !open;
+    $('bhist').setAttribute('aria-pressed', String(open));
+    if (open) { $('queuepanel').hidden = true; $('bqueue').setAttribute('aria-pressed', 'false'); loadHistory(); }
+  }
+  async function loadHistory(more) {
+    try {
+      const j = await api('history', { offset: more ? H.rows.length : 0, limit: 100 });
+      H.rows = more ? H.rows.concat(j.plays) : j.plays;
+      H.total = j.total;
+      H.err = '';
+    } catch (e) { H.err = e.message; }
+    paintHistory();
+  }
+  function paintHistory() {
+    const list = $('hlist');
+    const waiting = H.pending.slice().reverse().map(p => ({ id: 0, at: p.at, device: p.device, track: p.t, was: p.t, waiting: true }));
+    const rows = waiting.concat(H.rows);
+    $('hcount').textContent = H.total ? plural(H.total, 'play') : '';
+    list.replaceChildren();
+    if (H.err && !rows.length) { list.append(h('li', { class: 'more', text: `Couldn’t load the history: ${H.err}` })); return; }
+    if (!rows.length) { list.append(h('li', { class: 'more', text: 'Nothing played yet. A track shows here once you’ve listened for 30 seconds.' })); return; }
+    // what a tap plays: the history from there on, as a queue (only what is still in the library)
+    const playable = rows.filter(r => r.track);
+    const cur = P.queue[P.idx];
+    let day = null;
+    for (const r of rows) {
+      const d = dayOf(r.at);
+      if (d !== day) { day = d; list.append(h('li', { class: 'day', text: d })); }
+      const t = r.track, was = r.was || {};
+      const li = h('li', { class: 'pl' + (t ? '' : ' gone') + (cur && t && cur.id === t.id ? ' now' : ''), title: t ? null : 'No longer in the library' },
+        h('span', { class: 'h-when', text: clockOf(r.at) }),
+        h('span', { class: 'h-t' }, h('b', { text: t ? t.title : was.title }),
+          h('i', { text: [t ? t.artist : was.artist, t ? t.album : was.album, r.device, r.waiting ? 'not sent yet' : '', t ? '' : 'no longer in the library'].filter(Boolean).join(' · ') })),
+        t ? h('button', { class: 'h-m', title: 'More…', 'aria-label': 'More actions', 'aria-haspopup': 'menu', text: '⋯',
+          onclick: e => { e.stopPropagation(); openHistMenu(r, { el: e.currentTarget, right: true }, e.currentTarget); } }) : null);
+      if (t) {
+        li.addEventListener('click', () => startQueue(playable.map(x => x.track), playable.indexOf(r)));
+        li.addEventListener('contextmenu', e => { e.preventDefault(); openHistMenu(r, menuAt(e, li), li); });
+      }
+      list.append(li);
+    }
+    if (H.rows.length < H.total) list.append(h('li', { class: 'more' }, h('button', { type: 'button', text: 'Show more', onclick: () => loadHistory(true) })));
+  }
+  function openHistMenu(r, at, from) {
+    const items = trackMenuItems(r.track, {});
+    if (r.id) items.push({ sep: true }, { label: 'Remove from history', danger: true, onclick: async () => {
+      try { await apiPost('history_remove', { ids: [r.id] }); loadHistory(); } catch (e) { toast(e.message, true); }
+    } });
+    openMenu(items, at, from);
+  }
+  $('bhist').addEventListener('click', () => setHistPanel(!H.open));
+  $('hclose').addEventListener('click', () => setHistPanel(false));
+  $('hclear').addEventListener('click', async () => {
+    const yes = await dialog({ title: 'Clear the whole history?', text: 'Every play, on every device, is forgotten. Your tracks, playlists and Liked stay.', ok: 'Clear', danger: true });
+    if (!yes) return;
+    try { await apiPost('history_remove', { all: true }); H.pending = []; store.set('playsPending', []); loadHistory(); toast('History cleared'); } catch (e) { toast(e.message, true); }
+  });
+
   // ------------------------------------------------------------ queue panel
   function renderQueue() {
     const n = P.queue.length;
@@ -548,6 +662,7 @@
   $('bqueue').addEventListener('click', () => {
     const p = $('queuepanel');
     p.hidden = !p.hidden;
+    if (!p.hidden) setHistPanel(false);
     $('bqueue').setAttribute('aria-pressed', String(!p.hidden));
     renderQueue();
   });
@@ -856,6 +971,7 @@
     // Going somewhere closes the queue and Offline panels first, or on a phone they cover the page you went to.
     const go = hash => () => {
       $('queuepanel').hidden = true; $('bqueue').setAttribute('aria-pressed', 'false');
+      setHistPanel(false);
       if (OFF && mode.panel) setDlPanel(false);
       if (location.hash === hash) route(); else location.hash = hash;
     };
@@ -1559,7 +1675,7 @@
   // the letters, sliders), the menus and panels, and inputs.
   (() => {
     let x0 = 0, y0 = 0, t0 = 0, live = false;
-    const SKIP = '#tabs, .jump, input, textarea, select, .cmenu, .mback, .dback, .sa-veil, #queuepanel, #dlpanel, #scanpanel, #player';
+    const SKIP = '#tabs, .jump, input, textarea, select, .cmenu, .mback, .dback, .sa-veil, #queuepanel, #histpanel, #dlpanel, #scanpanel, #player';
     const tabs = () => [...document.querySelectorAll('#tabs a')].filter(a => !a.hidden);
     document.addEventListener('touchstart', e => {
       live = e.touches.length === 1 && !(e.target.closest && e.target.closest(SKIP)) && !menu.el;
@@ -1880,7 +1996,8 @@
     } catch (e) { /* offline: next time */ }
   }
   if (APP && $('bulkmb')) $('bulkmb').remove();             // the bulk page is for a computer
-  const start = () => { paintOffline(); route(); scanTick(); loadLiked(); refreshSaved(); };
+  if (APP && $('mbbtn')) $('mbbtn').remove();
+  const start = () => { paintOffline(); route(); scanTick(); loadLiked(); refreshSaved(); sendPlays(); };
   if (OFF) {
     OFF.init().then(() => { if (APP && !APP.key && OFF.count) mode.off = true; }).catch(() => {}).finally(start);
   } else start();

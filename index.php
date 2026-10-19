@@ -36,6 +36,7 @@ $v = static fn(string $f): string => (string)@filemtime(__DIR__ . '/' . $f);
   <button id="offbtn" type="button" hidden aria-pressed="false" title="Show only what is saved on this phone"><span class="ic" aria-hidden="true">⤓</span> Offline <span id="offcount"></span></button>
   <button id="dlbtn" type="button" hidden aria-haspopup="dialog" aria-expanded="false" title="Downloads"><span class="ic" aria-hidden="true">⇩</span><span id="dllabel"></span></button>
   <button id="scanbtn" type="button" title="Library scan" aria-haspopup="dialog" aria-expanded="false"><span class="ic" aria-hidden="true">⟳</span><span id="scanlabel"></span></button>
+  <a id="mbbtn" href="bulk-mb.php" title="Bulk MusicBrainz: match the whole library, review what it couldn't">⌕ MusicBrainz</a>
   <button id="shuffleall" type="button" title="Shuffle the whole library">🔀 Shuffle all</button>
 </header>
 
@@ -59,6 +60,11 @@ $v = static fn(string $f): string => (string)@filemtime(__DIR__ . '/' . $f);
 </section>
 
 <main id="view" tabindex="-1"></main>
+
+<section id="histpanel" class="sidepanel" hidden aria-label="History">
+  <div class="qhead"><b>History</b><span id="hcount"></span><button id="hclear" type="button">Clear</button><button id="hclose" type="button" aria-label="Close">×</button></div>
+  <ol id="hlist"></ol>
+</section>
 
 <section id="queuepanel" hidden aria-label="Queue">
   <div class="qhead"><b>Queue</b><span id="qcount"></span><button id="qclear" type="button">Clear</button><button id="qclose" type="button" aria-label="Close">×</button></div>
@@ -87,6 +93,7 @@ $v = static fn(string $f): string => (string)@filemtime(__DIR__ . '/' . $f);
   </div>
   <div id="extras">
     <input id="vol" type="range" min="0" max="100" value="100" aria-label="Volume">
+    <button id="bhist" type="button" title="History: what you've played, on every device" aria-pressed="false">🕘</button>
     <button id="bqueue" type="button" title="Queue">☰ <span id="qn"></span></button>
   </div>
 </footer>

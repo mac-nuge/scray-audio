@@ -112,7 +112,13 @@ what the files' tags say: the files are not touched, a rescan doesn't undo them,
 Covers you choose are saved in `scray-data/audio-covers/` and shown by a signed link. Saved (offline) tracks pick up edits
 the next time the app starts online. MusicBrainz is asked by the server at most once a second, and answers are kept a week.
 
-**Bulk MusicBrainz (`bulk-mb.php`, a desktop page; linked from the scan panel).** Start a run and every album (an album tag
+**History.** 🕘 next to the queue button: everything you've played, newest first, by day, with the device it was played on,
+the same on every device (it lives in the server's database). A play counts once it has been heard for 30 s, or half of a
+shorter track; skipping early or seeking doesn't count. A play while the server can't be reached waits on that device ("not
+sent yet") and is sent later with the time it happened, never twice. Tap a play to play from there; ⋯ for the usual menu and
+Remove from history; Clear forgets the lot.
+
+**Bulk MusicBrainz (`bulk-mb.php`, a desktop page; ⌕ MusicBrainz in the header on a computer, and in the scan panel).** Start a run and every album (an album tag
 in one folder) is looked up, one at a time: releases whose title is the album's (ignoring "(Remaster)", "[Deluxe]" and the
 like) and whose track count is yours; then the **original** (the oldest release) or the **best match** (MusicBrainz's score),
 as you choose; then the track lengths are checked (8 in 10 within 10 s). A match gets everything: titles, the track artists
@@ -170,7 +176,7 @@ The first save asks for a folder; pick one in Files (On My iPhone is fine). Save
 python3 tests/smoke.py     # needs php, ffmpeg, python3-mutagen, node
 python3 tests/ui_offline.py   # optional: needs `pip install playwright` and a Chromium
 python3 tests/bulk_mb.py      # the bulk MusicBrainz matcher (also in CI)
-python3 tests/ui_edit.py      # likewise (also ui_bulk.py, ui_library.py, ui_navigate.py)
+python3 tests/ui_edit.py      # likewise (also ui_bulk.py, ui_history.py, ui_library.py, ui_navigate.py)
 ```
 
 `tests/stub-data/` stands in for Scray's `scray_auth.php` / `scray_secrets.php`. `SCRAY_AUDIO_DATA_DIR`

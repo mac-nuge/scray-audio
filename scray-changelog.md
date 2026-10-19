@@ -7,6 +7,16 @@ named `test:` until it has been tried and then `stable:`. Record the reasoning, 
 
 ## Entries
 
+### audio 1.18 — test: history and musicbrainz link
+<!-- 2026-10-19T14:20Z -->
+- **Why:** (1) the bulk MusicBrainz page was hard to find: it was only linked inside the ⟳ scan panel. (2) A history of everything played, kept on the server so it's the same everywhere.
+- **What:**
+  - **Link:** "⌕ MusicBrainz" in the header, on a computer only (hidden on a phone's screen width and in the app, as the page is for a computer). The scan panel link stays.
+  - **Schema v9 `plays`:** one row per play (uid, track, when, device), with the track's title / artist / album copied in so a play still reads right after the file goes. `play_log` (batch; a uid already kept is ignored, so a resend never doubles; a time in the future is taken as now), `history` (newest first by when it happened, by offset, with the live track where it still exists), `history_remove` (ids, or all).
+  - **Page:** a play counts after 30 s heard, or half of a shorter track; only time actually played counts (seeks and the silent unlock clip don't); each repeat-one round is a play. The play goes straight to the server; if it can't (offline, signed out) it waits in this device's storage and is sent on the next play, when the browser says it's back online, when the page comes back to the front, every 2 minutes, or at the next start. 🕘 in the player bar opens History: by day (Today, Yesterday, then dates), time, title, artist, album, device; waiting ones say "not sent yet"; tap plays from there on; ⋯ has the track menu plus Remove from history; Clear asks first. Opening it closes the queue and the other way round; "Go to…" closes it; swipes on it don't switch tabs.
+- **Tested:** `smoke.py` (kept, no doubles, unknown tracks skipped, future time clamped, a late play slotting in by time, offset, auth, remove, clear). `tests/ui_history.py` (new, Playwright, real playback of 3 s tracks): a play past half counts and one skipped early doesn't, the panel, a play while the server is blocked waiting, surviving a reload, being sent once when back online, tap to play, remove, clear, the header link (and hidden at phone width). All other suites pass.
+- **To use:** upload `api.php`, `index.php`, `audio.js`, `audio.css`; new IPA for the app.
+
 ### audio 1.17 — test: folder column in bulk musicbrainz
 <!-- 2026-10-14T20:30Z -->
 - **Why:** asked for the folder as its own column on bulk-mb.php (it was only a tooltip on the album name).

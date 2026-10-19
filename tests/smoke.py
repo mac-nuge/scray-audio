@@ -294,6 +294,29 @@ def main():
     check("delete removes it and its items", [p["id"] for p in call("playlists")[1]["playlists"]] == [lid, pid]
           and sqlite3.connect(DB).execute("SELECT COUNT(*) FROM playlist_items WHERE playlist_id = ?", (pid2,)).fetchone()[0] == 0)
 
+    print("history")
+    check("no history to begin with", call("history")[1]["plays"] == [] and call("history")[1]["total"] == 0)
+    check("play_log needs POST", call("play_log", {"x": 1})[0] == 405)
+    st, j = call("play_log", body={"plays": [
+        {"uid": "a1", "track_id": byname["First"], "at": "2026-10-01T10:00:00Z", "device": "Computer"},
+        {"uid": "a2", "track_id": byname["Second"], "at": "2026-10-01T10:05:00Z", "device": "iPhone"},
+        {"uid": "a3", "track_id": 424242, "at": "2026-10-01T10:06:00Z"},
+        {"uid": "a4", "track_id": byname["Tune"], "at": "2099-01-01T00:00:00Z"}]})
+    check("plays are kept (not one for a track that isn't there)", st == 200 and j["added"] == 3, str(j))
+    check("sending the same plays again doesn't double them", call("play_log", body={"plays": [{"uid": "a1", "track_id": byname["First"]}]})[1]["added"] == 0)
+    st, j = call("history")
+    p = j["plays"]
+    check("newest first, with the track and the device", [x["was"]["title"] for x in p] == ["Tune", "Second", "First"] and p[1]["device"] == "iPhone" and p[1]["track"]["id"] == byname["Second"], str(p)[:400])
+    check("a time in the future is taken as now", p[0]["at"] < "2099", p[0]["at"])
+    call("play_log", body={"plays": [{"uid": "late", "track_id": byname["Other"], "at": "2026-10-01T10:02:00Z"}]})
+    p = call("history")[1]["plays"]
+    check("a play sent late (offline) goes where it happened", [x["was"]["title"] for x in p][1:] == ["Second", "Other", "First"], str([x["was"]["title"] for x in p]))
+    check("offset pages through it", [x["was"]["title"] for x in call("history", {"offset": 2, "limit": 1})[1]["plays"]] == ["Other"])
+    check("history needs a session", call("history", cookie=False)[0] == 401 and call("play_log", cookie=False, body={"plays": [{"track_id": 1}]})[0] == 401)
+    st, j = call("history_remove", body={"ids": [p[0]["id"]]})
+    check("remove one", j["removed"] == 1 and call("history")[1]["total"] == 3)
+    check("clear all", call("history_remove", body={"all": True})[1]["removed"] == 3 and call("history")[1]["total"] == 0)
+
     print("liked")
     check("nothing liked yet", call("liked")[1]["ids"] == [] and call("liked")[1]["id"] == lid)
     check("like needs POST", call("like", {"track_ids[]": "1"})[0] == 405)
