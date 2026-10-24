@@ -140,13 +140,13 @@
   }
 
   // ----------------------------------------------------------------- player
-  const audio = new Audio();
+  const audio = new window.ScrayGaplessPlayer();
   audio.preload = 'auto';
   const P = {
     queue: [], orig: [], idx: -1,
     shuffle: !!store.get('shuffle', false),
     repeat: store.get('repeat', 'off'),            // off | all | one
-    urls: new Map(), seq: 0, retried: null, errRun: 0, unlocked: false, seeking: false,
+    urls: new Map(), seq: 0, readySeq: -1, prefetchKey: '', retried: null, errRun: 0, unlocked: false, seeking: false,
   };
   audio.volume = Math.min(1, Math.max(0, store.get('vol', 1)));
   $('vol').value = Math.round(audio.volume * 100);
@@ -156,6 +156,7 @@
   // Our real source arrives after a network round trip, so start the element on
   // the tap with a silent clip, then swap the real track in.
   function unlock() {
+    audio.unlock();
     if (P.unlocked) return;
     P.unlocked = true;
     audio.src = SILENT;
@@ -180,14 +181,17 @@
     if (!t) return;
     P.idx = i;
     const seq = ++P.seq;
+    audio.cancelNext();
     P.retried = null;
     paintNow(t);
     try {
       const url = await getUrl(t);
       if (seq !== P.seq) return;
-      audio.src = url;
+      await audio.setTrack(url, t);
+      if (seq !== P.seq) return;
       if (at) audio.currentTime = at;
       if (play) await audio.play();
+      P.readySeq = seq;
     } catch (e) {
       if (seq !== P.seq) return;
       if (e && e.name === 'NotAllowedError') { toast('Tap play to start'); return; }
@@ -199,10 +203,31 @@
     prefetchNext();
   }
 
-  function prefetchNext() {   // sign the next link now so the change of track doesn't wait on the server
-    const n = P.queue[P.idx + 1];
-    if (n && !(OFF && OFF.has(n.id)) && linkStale(n, 600)) getUrl(n).catch(() => {});
+  function prefetchNext() {
+    if (P.readySeq !== P.seq) return;
+    const i = P.repeat === 'one' ? P.idx : P.idx + 1 < P.queue.length ? P.idx + 1 : P.repeat === 'all' ? 0 : -1;
+    const n = P.queue[i], seq = P.seq;
+    const key = `${seq}:${i}:${n?.id ?? ''}`;
+    if (P.prefetchKey === key) return;
+    P.prefetchKey = key;
+    audio.cancelNext();
+    if (n) getUrl(n).then(url => {
+      if (P.seq === seq && P.prefetchKey === key) audio.prepare(url, n, { index: i, id: n.id });
+    }).catch(() => {});
   }
+
+  audio.addEventListener('transition', event => {
+    const { index, id } = event.detail;
+    if (P.queue[index]?.id !== id) return;
+    P.idx = index; P.readySeq = ++P.seq; P.retried = null;
+    paintNow(P.queue[index]); paintPlay(); prefetchNext();
+  });
+  audio.addEventListener('modechange', () => {
+    const label = $('playbackmode');
+    label.hidden = !P.queue[P.idx];
+    label.textContent = audio.loading ? 'Preparing playback…' : audio.upcoming ? 'Gapless ready' : audio.current ? 'Buffered playback' : 'Streaming playback';
+    label.title = audio.current ? 'Decoded tracks are scheduled together when the next track is ready. Silence in the recording is preserved.' : 'Streaming fallback: seamless transitions cannot be guaranteed for this file or connection.';
+  });
 
   function skipAfterError(t) {
     if (++P.errRun >= 3) { toast('Several tracks in a row failed - stopping', true); return; }
@@ -332,7 +357,7 @@
     unlock();
     if (!audio.paused) { audio.pause(); return; }
     const t = P.queue[P.idx];
-    if (audio.src.startsWith('data:') || !audio.src || linkStale(t, 120)) {
+    if (audio.src.startsWith('data:') || !audio.src || (!audio.current && linkStale(t, 120))) {
       await load(P.idx, { play: true, at: audio.src.startsWith('data:') ? 0 : audio.currentTime || 0 });
       return;
     }
@@ -623,6 +648,7 @@
 
   // ------------------------------------------------------------ queue panel
   function renderQueue() {
+    prefetchNext();
     const n = P.queue.length;
     $('qn').textContent = n ? String(n) : '';
     const panel = $('queuepanel');
@@ -680,6 +706,7 @@
   $('bshuffle').addEventListener('click', () => setShuffle(!P.shuffle));
   $('brepeat').addEventListener('click', () => {
     P.repeat = { off: 'all', all: 'one', one: 'off' }[P.repeat] || 'off';
+    prefetchNext();
     store.set('repeat', P.repeat);
     paintControls();
     toast(`Repeat: ${P.repeat}`);
@@ -1447,7 +1474,7 @@
     if (j.folders.length) out.push(h('div', { class: 'folders' }, j.folders.map(f => folderRow(f))));
     if (j.tracks.length) out.push(trackList(j.tracks, { trackNumbers: false, inOrder: true }));
     if (!j.total) {
-      out.push(h('div', { class: 'empty', text: path ? 'Nothing in this folder.' : 'The library is empty. Run the scanner on the gateway (see the README), then reload.' }));
+      out.push(h('div', { class: 'empty', text: offlineOn() ? 'No saved music here yet. Go online and use Save offline on a track, album or folder.' : path ? 'Nothing in this folder.' : 'The library is empty. Run the scanner on the gateway (see the README), then reload.' }));
     }
     if (st) out.push(h('p', { class: 'subtitle', style: 'margin-top:28px' },
       `${plural(st.tracks, 'track')} · ${plural(st.albums, 'album')} · ${plural(st.artists, 'artist')} · ${longTime(st.ms)}`,
@@ -1712,7 +1739,7 @@
     if (listTab() && k !== '' && k !== 'f') { route(); return; }      // Artists, Albums, Genres, Playlists: filter in place
     if (!term) { if (onSearch) location.hash = '#/'; else route(); return; }
     const target = '#/search/' + enc(term);
-    if (onSearch) { history.replaceState(null, '', target); route(); } else location.hash = target;
+    if (onSearch) { window.ScrayNavigation.replace(target); route(); } else location.hash = target;
   };
   $('search').addEventListener('input', e => { clearTimeout(searchTimer); searchTimer = setTimeout(() => go(e.target.value), 300); });
   $('searchform').addEventListener('submit', e => { e.preventDefault(); clearTimeout(searchTimer); go($('search').value); });
@@ -1938,19 +1965,26 @@
       if (busy) r.style.setProperty('--p', j.total ? Math.min(100, j.received / j.total * 100) + '%' : '0%');
     });
     const b = $('dlbtn');
-    b.hidden = !(live || bad || mode.panel);
+    b.hidden = !(live || bad || mode.panel || window.ScrayDesktop);
     b.classList.toggle('busy', live > 0);
     b.classList.toggle('bad', !live && bad > 0);
     $('dllabel').textContent = live ? String(live) : bad ? '!' : '';
     if (mode.panel) paintDl(jobs, live, bad);
   }
 
+  let storageCheckedAt = 0;
   function paintDl(jobs, live, bad) {
     const list = jobs.filter(j => j.state !== 'cancelled');
     const done = list.filter(j => j.state === 'done').length;
     $('dlmsg').textContent = live ? `Saving ${plural(live, 'track')}…` : bad ? `${plural(bad, 'track')} failed` : 'Nothing downloading';
     if (APP) $('dlsign').textContent = APP.key ? `Sign out${APP.name ? ' (' + APP.name + ')' : ''}` : 'Sign in';
-    $('dlfolder').textContent = OFF.folder ? `Saved in “${OFF.folder}/Offline” · ${plural(OFF.count, 'track')}` : 'No folder chosen yet - you’ll be asked when you save something.';
+    $('dlfolder').textContent = OFF.folder ? `Saved in “${OFF.location || OFF.folder + '/Offline'}” · ${plural(OFF.count, 'track')}` : 'No folder chosen yet - you’ll be asked when you save something.';
+    if (window.ScrayDesktop && Date.now() - storageCheckedAt > 2000) {
+      storageCheckedAt = Date.now();
+      let note = $('dlstorage');
+      if (!note) { note = h('div', { id: 'dlstorage', class: 'smsg dim' }); $('dlfolder').after(note); }
+      OFF.storage().then(s => { note.textContent = `${s.used ? mb(s.used) : '0 MB'} saved · ${mb(s.free)} free`; }).catch(() => { note.textContent = 'Storage information unavailable'; });
+    }
     $('dllist').replaceChildren(...list.filter(j => j.state !== 'done').slice(0, 40).map(j => h('div', { class: 'dlrow' + (j.state === 'error' ? ' bad' : '') },
       h('span', { class: 'dn', text: j.track.title }),
       h('span', { class: 'ds', text: j.state === 'error' ? (j.error || 'failed') : j.state === 'queued' ? 'waiting' : j.total ? Math.round(Math.min(100, j.received / j.total * 100)) + '%' : '…' }),
@@ -1961,6 +1995,7 @@
   }
 
   function setDlPanel(open) {
+    if (open) storageCheckedAt = 0;
     mode.panel = open;
     $('dlpanel').hidden = !open;
     $('dlbtn').setAttribute('aria-expanded', String(open));
@@ -1969,6 +2004,7 @@
   }
 
   if (OFF) {
+    if (window.ScrayDesktop) $('dlfolderbtn').hidden = true;
     $('offbtn').addEventListener('click', () => setOffline(!mode.off, '', true));
     $('dlbtn').addEventListener('click', () => setDlPanel(!mode.panel));
     $('dlclose').addEventListener('click', () => setDlPanel(false));
@@ -1999,6 +2035,6 @@
   if (APP && $('mbbtn')) $('mbbtn').remove();
   const start = () => { paintOffline(); route(); scanTick(); loadLiked(); refreshSaved(); sendPlays(); };
   if (OFF) {
-    OFF.init().then(() => { if (APP && !APP.key && OFF.count) mode.off = true; }).catch(() => {}).finally(start);
+    OFF.init().then(() => { if ((APP && !APP.key && (OFF.count || window.ScrayDesktop)) || (window.ScrayDesktop && !navigator.onLine)) mode.off = true; }).catch(() => {}).finally(start);
   } else start();
 })();

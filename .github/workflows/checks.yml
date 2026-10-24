@@ -23,6 +23,8 @@ jobs:
         run: |
           for f in *.php tests/stub-data/*.php; do php -l "$f"; done
           node --check audio.js
+          node --check navigation.js
+          node --check gapless.js
           node --check offline.js
           node --check app.js
           node --check bulk-mb.js

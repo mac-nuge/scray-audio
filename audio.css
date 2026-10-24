@@ -38,6 +38,11 @@ button { cursor: pointer; background: none; border: 0; padding: 0; }
 }
 .brand { font: 600 15px var(--mono); letter-spacing: .04em; color: var(--dim); }
 .brand b { color: var(--accent); font-weight: 600; }
+#viewnav { display: flex; flex: none; gap: 4px; }
+#viewnav button { width: 38px; height: 38px; border: 1px solid var(--line); border-radius: 8px; font-size: 22px; line-height: 1; }
+#viewnav button:hover:not(:disabled) { color: var(--accent); background: var(--panel2); }
+#viewnav button:disabled { opacity: .3; cursor: default; }
+#playbackmode { font-size: 11px; color: var(--dim); margin-top: 2px; }
 #tabs { display: flex; gap: 2px; }
 #tabs a { padding: 6px 12px; border-radius: 6px; color: var(--dim); }
 #tabs a:hover { color: var(--text); background: var(--panel); }

@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; form-action 'none'">
+<title>Set up Scray Audio</title>
+<style>
+  :root { color-scheme: dark; font: 16px system-ui; background: #0d0f12; color: #edf3f8; }
+  body { max-width: 580px; padding: 60px 24px; margin: auto; }
+  h1 { color: #39c3d1; } p { line-height: 1.6; color: #b2bfce; }
+  label { display: block; margin-top: 28px; }
+  input { box-sizing: border-box; width: 100%; padding: 14px; margin: 10px 0 20px; border: 1px solid #465568; border-radius: 8px; font: inherit; }
+  button { background: #39c3d1; color: #06282c; border: 0; border-radius: 8px; padding: 12px 22px; font: bold 16px system-ui; cursor: pointer; }
+  #error { color: #ff9b9b; } small { color: #b2bfce; }
+</style>
+<h1>Scray Audio</h1>
+<p>Your player is bundled in this folder and opens without internet. Enter a library address to sign in and download music for offline listening.</p>
+<form>
+  <label for="server">Library address</label>
+  <input id="server" name="server" type="url" required placeholder="https://macnguyen.com/audio/">
+  <button type="submit">Open library</button>
+  <p id="error" role="alert"></p>
+</form>
+<p><small>You can change the address later from the App menu. Each library keeps separate downloads. Minimise the player to keep listening, and hover over its taskbar icon for playback controls.</small></p>
+</html>

@@ -1,0 +1,7 @@
+<!doctype html><title>Scray Audio test</title>
+<button id="bprev">Previous</button><button id="bplay">▶</button><button id="bnext">Next</button>
+<button id="nplike" hidden></button>
+<script>
+window.commands = [];
+for (const id of ['bprev', 'bplay', 'bnext']) document.getElementById(id).onclick = () => window.commands.push(id);
+</script>

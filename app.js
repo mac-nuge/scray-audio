@@ -21,7 +21,7 @@
 
   const A = window.SCRAY_AUDIO = {
     app: true,
-    get server() { return base(get(LS.server) || boot.server); },
+    get server() { return base(boot.lockServer ? boot.server : get(LS.server) || boot.server); },
     get api() { return A.server + '/api.php'; },
     get key() { const k = get(LS.key); return KEY_RE.test(k) ? k : ''; },
     get name() { return get(LS.name); },
@@ -57,7 +57,7 @@
     const alt = el('button', { type: 'button', class: 'sa-link' }, 'Use a recovery code instead');
     codeWrap.append(el('label', {}, 'Code from your authenticator app'), code, alt);
     const name = el('input', { type: 'text', name: 'name', maxlength: '60', autocomplete: 'off' });
-    name.value = get(LS.name) || 'iPhone';
+    name.value = get(LS.name) || boot.deviceName || 'iPhone';
     const server = el('input', { type: 'url', placeholder: 'https://macnguyen.com/audio', autocapitalize: 'none', spellcheck: 'false' });
     server.value = A.server;
     const serverWrap = el('div', { class: 'sa-step', hidden: '' });
@@ -65,6 +65,7 @@
     const where = el('button', { type: 'button', class: 'sa-link' }, '');
     const paintWhere = () => { where.textContent = 'Library: ' + (A.server.replace(/^https?:\/\//, '') || 'not set') + ' · change'; };
     paintWhere();
+    if (boot.lockServer) where.hidden = true;
     const err = el('div', { class: 'sa-err', 'aria-live': 'polite' });
     const later = el('button', { type: 'button', class: 'sa-later' }, 'Later');
     const go = el('button', { type: 'submit', class: 'sa-go' }, 'Sign in');
@@ -89,7 +90,7 @@
       try {
         const r = await fetch(new URL(server.value.trim()).origin + '/scray/api.php?action=device_pair', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
-          body: JSON.stringify({ password: pw.value, code: code.value.trim(), name: name.value.trim(), app: 'BBW Sounds' }),
+          body: JSON.stringify({ password: pw.value, code: code.value.trim(), name: name.value.trim(), app: boot.appName || 'BBW Sounds' }),
         });
         const j = await r.json().catch(() => ({}));
         busy = false; go.disabled = false;
@@ -126,5 +127,8 @@
 
   // Not signed in: offer the sheet once the page is up (once per app start - "Later" holds it off).
   // The downloads still play.
-  if (!A.key && !sget(SS_LATER)) document.addEventListener('DOMContentLoaded', () => setTimeout(() => A.signIn(), 600));
+  if (!A.key && !sget(SS_LATER)) document.addEventListener('DOMContentLoaded', () => setTimeout(() => {
+    if (boot.lockServer && (!navigator.onLine || window.ScrayOffline?.count)) return;
+    A.signIn();
+  }, 600));
 })();

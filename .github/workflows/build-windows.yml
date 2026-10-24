@@ -1,0 +1,44 @@
+name: Build Windows app
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'windows/**'
+      - '.github/workflows/build-windows.yml'
+      - 'audio.js'
+      - 'navigation.js'
+      - 'gapless.js'
+      - 'audio.css'
+      - 'app.js'
+      - 'offline.js'
+      - 'index.php'
+      - 'VERSION'
+      - 'app/scripts/make-web.js'
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: windows
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: windows/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build:web
+      - run: npm run test:desktop
+      - run: npm run test:offline
+      - run: npm run test:gapless
+      - run: npm run package
+      - name: Create portable ZIP
+        run: Compress-Archive -Path dist/Scray-Audio-win32-x64 -DestinationPath dist/Scray-Audio-Windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Scray-Audio-Windows
+          path: windows/dist/Scray-Audio-Windows.zip

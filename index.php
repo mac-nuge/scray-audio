@@ -24,6 +24,10 @@ $v = static fn(string $f): string => (string)@filemtime(__DIR__ . '/' . $f);
 <body>
 <header id="top">
   <a class="brand" href="#/">scray<b>audio</b></a>
+  <nav id="viewnav" aria-label="View history">
+    <button id="navback" type="button" title="Back to previous view" aria-label="Back to previous view" disabled>←</button>
+    <button id="navforward" type="button" title="Forward to next view" aria-label="Forward to next view" disabled>→</button>
+  </nav>
   <nav id="tabs">
     <a href="#/search/" data-tab="search" id="tabres" hidden>Results</a>
     <a href="#/" data-tab="folders">Folders</a>
@@ -74,7 +78,7 @@ $v = static fn(string $f): string => (string)@filemtime(__DIR__ . '/' . $f);
 <footer id="player">
   <div id="np">
     <div id="npcover" class="cover"><span>♪</span></div>
-    <div id="nptext"><div id="nptitle">Nothing playing</div><div id="npsub"></div></div>
+    <div id="nptext"><div id="nptitle">Nothing playing</div><div id="npsub"></div><div id="playbackmode" hidden></div></div>
     <button id="nplike" type="button" class="lk" hidden></button>
   </div>
   <div id="controls">
@@ -103,6 +107,8 @@ $v = static fn(string $f): string => (string)@filemtime(__DIR__ . '/' . $f);
 <script src="/scray/scray-version.js"></script>
 <script src="app.js?v=<?= $v('app.js') ?>"></script>
 <script src="offline.js?v=<?= $v('offline.js') ?>"></script>
+<script src="navigation.js?v=<?= $v('navigation.js') ?>"></script>
+<script src="gapless.js?v=<?= $v('gapless.js') ?>"></script>
 <script src="audio.js?v=<?= $v('audio.js') ?>"></script>
 </body>
 </html>

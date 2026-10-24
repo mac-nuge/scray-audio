@@ -29,10 +29,32 @@ track (valid an hour; the player asks for a fresh one if it expires mid-pause).
 
 ## What's in here
 
+The header's **Back** and **Forward** arrows move through views visited in this
+player tab, including folders, albums, artists and search. They share browser
+history and stop at the first player view. Both app bundles use the same controls.
+
+Playback prepares the next track on a shared Web Audio clock. **Gapless ready** means
+the next track is decoded and scheduled at the current track's endpoint, without a
+crossfade or added silence. Silence already in the recording is preserved. The
+first track may take longer to start because it must be buffered and decoded.
+
+This is not a universal gapless guarantee: codecs unsupported by Web Audio, media
+servers without fetch/CORS access, slow connections, and large tracks fall back to
+ordinary streaming (shown as **Streaming playback**). The buffer limits are 64 MiB
+compressed and 128 MiB decoded per track, with tracks over 12 minutes streamed;
+downloads for gapless preparation time out after 15 seconds. Test live streaming
+and iOS lock-screen/background behaviour on the target device before release.
+
+The media endpoint must allow cross-origin GET/fetch for Web Audio (the existing
+signed media URLs carry authorisation, rather than browser cookies). Offline
+Windows media is served locally with the same access and byte-range support.
+
 | File | |
 |---|---|
 | `index.php`, `audio.js`, `audio.css` | the page (no libraries) |
+| `navigation.js`, `gapless.js` | shared view history and buffered audio scheduling |
 | `app/` | the iOS app, **BBW Sounds**: an Expo + Swift wrapper around this page (see *The iOS app* below) |
+| `windows/` | portable Windows player with taskbar playback controls; see [Windows setup and builds](windows/README.md) |
 | `.github/workflows/build-ios.yml` | builds the unsigned IPA on a macOS runner |
 | `offline.js`, `app.js` | saving tracks on the phone and the Offline filter; the iOS app's sign-in and setup. Both do nothing in a browser tab |
 | `api.php` | the API: browse, search, signed links, and the scanner's `audio_worker_*` actions |

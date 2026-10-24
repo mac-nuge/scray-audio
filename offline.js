@@ -170,11 +170,12 @@
   if (!root || !root.document) return;
 
   // ------------------------------------------------------------ 2. the bridge
-  const handler = root.webkit && root.webkit.messageHandlers && root.webkit.messageHandlers.scrayAudio;
+  const desktop = root.ScrayDesktop;
+  const handler = desktop || (root.webkit && root.webkit.messageHandlers && root.webkit.messageHandlers.scrayAudio);
   const pending = {};
   root._saResolve = (id, v) => { const p = pending[id]; if (p) { delete pending[id]; p.res(v); } };
   root._saReject = (id, e) => { const p = pending[id]; if (p) { delete pending[id]; p.rej(new Error(e || 'failed')); } };
-  const call = (action, payload) => new Promise((res, rej) => {
+  const call = (action, payload) => desktop ? desktop.call(action, payload || null) : new Promise((res, rej) => {
     const id = Math.random().toString(36).slice(2);
     pending[id] = { res, rej };
     handler.postMessage({ id, action, payload: payload || null });
@@ -182,7 +183,7 @@
 
   // ------------------------------------------------------------ 3. store and queue
   const COVER_DIR = '.covers/';
-  const S = { tracks: new Map(), folder: null, ready: false, jobs: new Map(), listeners: new Set(), saveTimer: 0, tick: 0, running: 0 };
+  const S = { tracks: new Map(), folder: null, location: null, ready: false, jobs: new Map(), listeners: new Set(), saveTimer: 0, tick: 0, running: 0 };
   const MAX_AT_ONCE = 3;                                                            // ⚙️ downloads running together
   // A cover chosen in the library (coverv not 'f') gets its own name, so changing it fetches the new picture.
   const coverName = (folder, v) => (folder || '_').replace(/[\/\\:]/g, '~') + (v && v !== 'f' ? '@' + v : '') + '.jpg';
@@ -205,6 +206,7 @@
     try {
       const st = await call('state');
       S.folder = st && st.folder || null;
+      S.location = st && st.location || null;
       if (S.folder) {
         const text = await call('manifestRead');
         let m = null;
@@ -241,8 +243,11 @@
         } else if (have) entry.cf = cf;
       }
       S.tracks.set(t.id, entry);
-      j.state = 'done'; saveSoon();
+      if (desktop) await call('manifestWrite', { text: JSON.stringify({ v: 1, tracks: [...S.tracks.values()] }) });
+      else saveSoon();
+      j.state = 'done';
     } catch (e) {
+      if (desktop) S.tracks.delete(t.id);
       j.state = e && /cancel/i.test(e.message) ? 'cancelled' : 'error';
       j.error = e && e.message || 'failed';
     }
@@ -264,12 +269,14 @@
     const j = S.jobs.get(+String(key).slice(1));
     if (j && key[0] === 't') { j.received = received; j.total = total; changed(); }
   };
+  if (desktop) desktop.onProgress(root._saProgress);
 
   root.ScrayOffline = {
     available: !!handler,
     init,
     get ready() { return S.ready; },
     get folder() { return S.folder; },
+    get location() { return S.location; },
     get count() { return S.tracks.size; },
     has: id => S.tracks.has(id),
     all: () => [...S.tracks.values()],
@@ -301,11 +308,18 @@
       if (!gone.length) return 0;
       const entries = gone.map(t => S.tracks.get(t.id));          // what is saved (it has the cover's name; the caller's track does not)
       const paths = entries.map(t => t.path);
+      if (desktop) await call('remove', { paths });
       gone.forEach(t => S.tracks.delete(t.id));
       const left = new Set([...S.tracks.values()].map(t => t.cf).filter(Boolean));
       const orphan = [...new Set(entries.map(t => t.cf).filter(cf => cf && !left.has(cf)))].map(cf => COVER_DIR + cf);
-      saveSoon(); changed(true);
-      await call('remove', { paths: paths.concat(orphan) }).catch(() => {});
+      if (desktop) {
+        await call('remove', { paths: orphan });
+        await call('manifestWrite', { text: JSON.stringify({ v: 1, tracks: [...S.tracks.values()] }) });
+      } else {
+        saveSoon();
+        await call('remove', { paths: paths.concat(orphan) }).catch(() => {});
+      }
+      changed(true);
       return gone.length;
     },
     /**

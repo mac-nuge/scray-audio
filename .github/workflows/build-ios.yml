@@ -11,6 +11,8 @@ on:
     paths:
       - 'app/**'
       - 'audio.js'
+      - 'navigation.js'
+      - 'gapless.js'
       - 'audio.css'
       - 'offline.js'
       - 'app.js'
