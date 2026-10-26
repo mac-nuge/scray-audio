@@ -993,6 +993,44 @@
     if (onPlaylist(id)) refreshPlaylist(id);
   }
 
+  // Same-genre radio uses the same library API online and the saved index offline.
+  // Split explicit multi-value separators, but preserve names such as R&B and Pop/Rock.
+  function genreKeys(value) {
+    return [...new Set(String(value || '').split(/[;,|]+/).map(v => fold(v).trim().replace(/\s+/g, ' '))
+      .filter(v => v && !['unknown', 'unknown genre', 'other', 'none', 'n/a', '(0)'].includes(v)))];
+  }
+
+  let similarRequest = 0;
+  async function moreLikeThis(t) {
+    const request = ++similarRequest, seq = P.seq;
+    const keys = new Set(genreKeys(t.genre));
+    if (!keys.size) { toast('This track has no genre. Add one in Edit details, then try again.', true); return; }
+    unlock(); // Preserve the phone tap's playback permission before awaiting the library.
+    toast('Finding music with the same genre…');
+    try {
+      const { genres } = await api('genres');
+      const names = genres.filter(g => genreKeys(g.name).some(k => keys.has(k))).map(g => g.name);
+      const found = new Map();
+      let capped = false;
+      for (const genre of names) {
+        if (request !== similarRequest || seq !== P.seq) return;
+        const result = await api('tracks', { genre, limit: 100000 });
+        capped ||= !!result.capped;
+        for (const track of result.tracks) {
+          if (track.id !== t.id && genreKeys(track.genre).some(k => keys.has(k))) found.set(track.id, track);
+        }
+      }
+      if (request !== similarRequest || seq !== P.seq) return;
+      // A failed server request can switch the app to Offline during this search.
+      if (offlineOn()) for (const id of found.keys()) { if (!OFF.has(id)) found.delete(id); }
+      if (!found.size) { toast(offlineOn() ? 'No other saved tracks share this genre.' : 'No other tracks share this genre.', true); return; }
+      playList([...found.values()], true);
+      toast(`${plural(found.size, 'track')} matching ${t.genre}${capped ? ' (library result limit reached)' : ''}`);
+    } catch (e) {
+      if (request === similarRequest && seq === P.seq) toast(e.message, true);
+    }
+  }
+
   function trackMenuItems(t, ctx) {
     // Going to the page you are already on does nothing by itself: run the route again so it still answers.
     // Going somewhere closes the queue and Offline panels first, or on a phone they cover the page you went to.
@@ -1005,7 +1043,8 @@
     const known = v => v && v !== 'Unknown artist';
     const items = [];
     if (ctx.list) items.push({ label: 'Play', onclick: () => (ctx.inOrder ? playFrom(ctx.list, ctx.index) : startQueue(ctx.list, ctx.index)) });
-    items.push({ label: 'Play next', onclick: () => enqueue(t, true) }, { label: 'Add to queue', onclick: () => enqueue(t, false) }, { sep: true });
+    items.push({ label: 'Play next', onclick: () => enqueue(t, true) }, { label: 'Add to queue', onclick: () => enqueue(t, false) },
+      { label: 'More like this', hint: t.genre || 'Same genre', onclick: () => moreLikeThis(t) }, { sep: true });
     if (t.album) items.push({ label: 'Go to album', hint: t.album, onclick: go(albumHash(t)) });
     if (known(t.albumArtist)) items.push({ label: 'Go to artist', hint: t.albumArtist, onclick: go(`#/artist/${enc(t.albumArtist)}`) });
     if (t.artist && t.artist !== t.albumArtist) items.push({ label: 'More by', hint: t.artist, onclick: go(`#/search/${enc(t.artist)}`) });

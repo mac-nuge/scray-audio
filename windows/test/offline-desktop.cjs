@@ -94,6 +94,12 @@ app.whenReady().then(async () => {
   win.webContents.send('transport', 'toggle');
   await until('document.getElementById("bplay").textContent.includes("▶")');
   assert.ok(states.some(s => s.playing && s.ready));
+  await evaluate('document.querySelector(".trk").dispatchEvent(new MouseEvent("contextmenu", {bubbles: true, clientX: 50, clientY: 150}))');
+  await until('[...document.querySelectorAll("button")].some(b => b.textContent.includes("More like this"))');
+  await evaluate('[...document.querySelectorAll("button")].find(b => b.textContent.includes("More like this")).click()');
+  await until('document.getElementById("nptitle").textContent === "Next test" && document.getElementById("bplay").textContent.includes("⏸")');
+  assert.match(await evaluate('document.getElementById("toast").textContent'), /1 track.*matching Test/);
+  console.log('PASS: More like this context menu builds a same-genre queue offline');
   await evaluate('ScrayOffline.remove(ScrayOffline.all())');
   await new Promise(resolve => setTimeout(resolve, 600));
   await win.loadURL('scray-app://library-test/index.html');

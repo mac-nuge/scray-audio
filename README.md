@@ -33,6 +33,15 @@ The header's **Back** and **Forward** arrows move through views visited in this
 player tab, including folders, albums, artists and search. They share browser
 history and stop at the first player view. Both app bundles use the same controls.
 
+**More like this** in a track's right-click / **…** menu replaces the queue and
+starts shuffled playback of other tracks sharing its genre. Available on the web,
+iPhone and Windows, including saved music in Offline mode. Matching ignores case
+and extra spaces and supports semicolon, comma or pipe-separated genre tags;
+it does not treat Rock as a match for Hard Rock. Untagged tracks and genres with
+no other matches leave the queue unchanged. Genres applied by the existing
+MusicBrainz matcher are included; this action does not perform live external
+recommendations or change metadata. App installations need rebuilding to receive it.
+
 Playback prepares the next track on a shared Web Audio clock. **Gapless ready** means
 the next track is decoded and scheduled at the current track's endpoint, without a
 crossfade or added silence. Silence already in the recording is preserved. The
