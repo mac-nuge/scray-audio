@@ -1005,7 +1005,7 @@
     const request = ++similarRequest, seq = P.seq;
     const keys = new Set(genreKeys(t.genre));
     if (!keys.size) { toast('This track has no genre. Add one in Edit details, then try again.', true); return; }
-    unlock(); // Preserve the phone tap's playback permission before awaiting the library.
+    if (!P.queue[P.idx]) unlock(); // Only an empty player may need playback permission.
     toast('Finding music with the same genre…');
     try {
       const { genres } = await api('genres');
@@ -1023,9 +1023,20 @@
       if (request !== similarRequest || seq !== P.seq) return;
       // A failed server request can switch the app to Offline during this search.
       if (offlineOn()) for (const id of found.keys()) { if (!OFF.has(id)) found.delete(id); }
+      const current = P.queue[P.idx];
+      if (current) found.delete(current.id);
       if (!found.size) { toast(offlineOn() ? 'No other saved tracks share this genre.' : 'No other tracks share this genre.', true); return; }
-      playList([...found.values()], true);
-      toast(`${plural(found.size, 'track')} matching ${t.genre}${capped ? ' (library result limit reached)' : ''}`);
+      if (current) {
+        // Do not load, seek, pause or resume the active source. Refresh only its successor.
+        P.orig = [current, ...found.values()];
+        P.queue = [current, ...shuffled([...found.values()])];
+        P.idx = 0;
+        P.shuffle = true;
+        store.set('shuffle', true);
+        paintControls();
+        renderQueue();
+      } else playList([...found.values()], true);
+      toast(`${plural(found.size, 'track')} ${current ? 'queued' : 'matching'} · ${t.genre}${capped ? ' (library result limit reached)' : ''}`);
     } catch (e) {
       if (request === similarRequest && seq === P.seq) toast(e.message, true);
     }

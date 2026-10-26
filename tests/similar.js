@@ -7,7 +7,8 @@ const source = fs.readFileSync(require('node:path').join(__dirname, '../audio.js
 function player(tracks, offline = false) {
   const played = [], messages = [], calls = [];
   const context = vm.createContext({
-    P: { seq: 0 }, fold: s => s.toLowerCase().normalize('NFD').replace(/\p{Mn}+/gu, ''),
+    P: { seq: 0, queue: [], idx: -1 }, fold: s => s.toLowerCase().normalize('NFD').replace(/\p{Mn}+/gu, ''),
+    shuffled: list => list.slice().reverse(), store: { set() {} }, paintControls() {}, renderQueue() {},
     OFF: { has: id => tracks.some(t => t.id === id) },
     unlock() {}, toast: text => messages.push(text), offlineOn: () => offline,
     plural: n => `${n} tracks`, playList: (list, shuffle) => played.push({ list, shuffle }),
@@ -52,4 +53,17 @@ test('server failure preserves queue and reports error', async () => {
   await p.context.moreLikeThis({ id: 1, genre: 'Rock' });
   assert.equal(p.played.length, 0);
   assert.equal(p.messages.at(-1), 'Unavailable');
+});
+test('keeps current source and replaces upcoming tracks without starting playback', async () => {
+  const p = player([{ id: 1, genre: 'Rock' }, { id: 2, genre: 'Rock' }, { id: 3, genre: 'Rock' }]);
+  const current = { id: 2, genre: 'Rock' };
+  Object.assign(p.context.P, { queue: [{ id: 9 }, current, { id: 8 }], idx: 1 });
+  p.context.unlock = () => { throw new Error('Must not touch active playback'); };
+  await p.context.moreLikeThis({ id: 1, genre: 'Rock' });
+  assert.equal(p.played.length, 0);
+  assert.equal(p.context.P.queue[0], current);
+  assert.deepEqual(Array.from(p.context.P.queue, t => t.id), [2, 3]);
+  assert.deepEqual(Array.from(p.context.P.orig, t => t.id), [2, 3]);
+  assert.equal(p.context.P.idx, 0);
+  assert.equal(p.context.P.seq, 0);
 });

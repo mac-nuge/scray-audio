@@ -33,8 +33,9 @@ The header's **Back** and **Forward** arrows move through views visited in this
 player tab, including folders, albums, artists and search. They share browser
 history and stop at the first player view. Both app bundles use the same controls.
 
-**More like this** in a track's right-click / **…** menu replaces the queue and
-starts shuffled playback of other tracks sharing its genre. Available on the web,
+**More like this** in a track's right-click / **…** menu keeps the current song
+playing and replaces upcoming tracks with shuffled matches for the selected track's
+genre. A paused song stays paused; an empty player starts the matches. Available on the web,
 iPhone and Windows, including saved music in Offline mode. Matching ignores case
 and extra spaces and supports semicolon, comma or pipe-separated genre tags;
 it does not treat Rock as a match for Hard Rock. Untagged tracks and genres with
