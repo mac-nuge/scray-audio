@@ -80,6 +80,15 @@ try:
             tap(".dbox:not(.sheet) .btn.go"); pg.wait_for_timeout(900)
             chk("undo all: back to the files' tags", "Compilation" in pg.inner_text("h1.title") and "Other" in pg.evaluate(titles), pg.inner_text("h1.title"))
 
+            # MusicBrainz from a folder (untagged files have no album page): the folder's name is the first guess
+            pg.goto(PAGE + "#/f/Music%2FSingles"); pg.wait_for_selector(".trk")
+            chk("a folder with tracks in it has the MusicBrainz button", pg.locator(".bar .btn:has-text('MusicBrainz')").count() == 1)
+            tap(".bar .btn:has-text('MusicBrainz')"); pg.wait_for_selector(".mbres .empty, .mbres .mbrel")
+            chk("...prefilled from the folder name, and it searched by itself", pg.input_value(".sheet input[aria-label=Album]") == "Singles" and pg.input_value(".sheet input[aria-label=Artist]") == "")
+            tap(".sheet .btn:has-text('Close')"); pg.wait_for_selector(".sheet", state="detached")
+            pg.goto(PAGE + "#/f/Music"); pg.wait_for_selector(".folders")
+            chk("a folder with only sub-folders doesn't", pg.locator(".bar .btn:has-text('MusicBrainz')").count() == 0)
+
             # MusicBrainz
             pg.goto(PAGE + "#/album/Artist%20One/Album%20A"); pg.wait_for_selector(".trk")
             tap(".bar .btn:has-text('MusicBrainz')"); pg.wait_for_selector(".mbrel")
