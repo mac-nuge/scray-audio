@@ -7,6 +7,13 @@ named `test:` until it has been tried and then `stable:`. Record the reasoning, 
 
 ## Entries
 
+### audio 1.19 — test: musicbrainz from folders
+<!-- 2026-10-27T09:30Z -->
+- **Why:** completely untagged songs have no album tag, so they never get an album page, and the "⌕ MusicBrainz" lookup only lived on album pages. There was no way to look such a folder up and have MusicBrainz write the details in.
+- **What:** a folder page that has tracks directly in it now has "⌕ MusicBrainz" in its button row (a folder with only sub-folders doesn't). It opens the same lookup as the album page, for the tracks in that folder, with the search boxes filled from the folder's name: "Artist - Album" fills both, any other name is the album. The tags still win when there are any (and "Unknown artist" is never searched for). Everything after the search is unchanged: pick a release, see old → new, tick what to apply, cover included; tracks are paired by order when the counts match, otherwise by track number, with the usual warning. Page only: no IPA.
+- **Tested:** `tests/ui_edit.py` (a folder of untagged tracks has the button, the boxes are filled from its name and it searches by itself; a folder with only sub-folders doesn't), desktop and phone width. Lint clean.
+- **To use:** upload `audio.js`.
+
 ### audio 1.18 — test: history and musicbrainz link
 <!-- 2026-10-19T14:20Z -->
 - **Why:** (1) the bulk MusicBrainz page was hard to find: it was only linked inside the ⟳ scan panel. (2) A history of everything played, kept on the server so it's the same everywhere.

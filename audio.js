@@ -1298,13 +1298,22 @@
     return ours.map((t, i) => [t, theirs[i] || null]);
   }
 
-  function findOnMB(tracks) {
+  /** For untagged files the folder is the only clue: "Artist - Album" gives both, anything else is taken as the album. */
+  function guessFromFolder(path) {
+    const name = String(path || '').split('/').pop().trim();
+    const m = name.match(/^(.+?)\s+[-–—]\s+(.+)$/);
+    return m ? { artist: m[1].trim(), album: m[2].trim() } : { artist: '', album: name };
+  }
+
+  function findOnMB(tracks, guess) {
     if (needServer()) return;
     const wasHash = location.hash;
     const sh = openSheet('Find on MusicBrainz', 'wide');
-    const a0 = common(tracks, 'album_artist'), al0 = common(tracks, 'album');
-    const artist = h('input', { class: 'dinput', type: 'text', value: a0 && a0 !== 'Unknown artist' ? a0 : (common(tracks, 'artist') || ''), placeholder: 'Artist', 'aria-label': 'Artist' });
-    const album = h('input', { class: 'dinput', type: 'text', value: al0 || '', placeholder: 'Album', 'aria-label': 'Album' });
+    const a0 = common(tracks, 'album_artist'), al0 = common(tracks, 'album'), ar0 = common(tracks, 'artist');
+    const known = v => v && v !== 'Unknown artist';
+    const g = guess || {};
+    const artist = h('input', { class: 'dinput', type: 'text', value: known(a0) ? a0 : (known(ar0) ? ar0 : (g.artist || '')), placeholder: 'Artist', 'aria-label': 'Artist' });
+    const album = h('input', { class: 'dinput', type: 'text', value: al0 || g.album || '', placeholder: 'Album', 'aria-label': 'Album' });
     const go = h('button', { class: 'btn go', type: 'submit', text: 'Search' });
     const out = h('div', { class: 'mbres' });
     const form = h('form', { class: 'mbq' }, artist, album, go);
@@ -1519,7 +1528,9 @@
     const head = h('div', { class: 'pagehead small' }, j.art != null ? coverEl(j.art) : null, h('div', {}, crumbs,
       h('div', { class: 'subtitle', text: j.total ? plural(j.total, 'track') + (j.folders.length ? ` in ${plural(j.folders.length, 'folder')}` : '') : '' })));
     const out = [head];
-    if (j.total) out.push(actions(j.folders.length ? folderTracks : async () => j.tracks));
+    // Untagged files have no album page to look up from, so a folder with tracks in it can be looked up too (its name is the first guess).
+    const mbBtn = j.tracks.length ? h('button', { class: 'btn', text: '⌕ MusicBrainz', title: 'Look the tracks in this folder up on MusicBrainz and fill in their details and cover', onclick: () => findOnMB(j.tracks, guessFromFolder(path)) }) : null;
+    if (j.total) out.push(actions(j.folders.length ? folderTracks : async () => j.tracks, mbBtn ? h('span', { class: 'grp' }, mbBtn) : null));
 
     if (j.folders.length) out.push(h('div', { class: 'folders' }, j.folders.map(f => folderRow(f))));
     if (j.tracks.length) out.push(trackList(j.tracks, { trackNumbers: false, inOrder: true }));
